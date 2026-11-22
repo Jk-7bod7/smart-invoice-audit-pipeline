@@ -34,7 +34,7 @@ for (const suite of SUITES) {
   const run = spawnSync('node', [scriptPath], {
     cwd: __dirname,
     encoding: 'utf8',
-    timeout: 120000,
+    timeout: 180000,
     env: {
       ...process.env,
       NODE_ENV: 'test',

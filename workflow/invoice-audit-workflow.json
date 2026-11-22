@@ -19,11 +19,10 @@
     {
       "parameters": {
         "conditions": {
-          "string": [
+          "boolean": [
             {
-              "value1": "={{ ($json.headers && $json.headers['x-webhook-token']) || '' }}",
-              "operation": "equal",
-              "value2": "={{ $env.INVOICE_WEBHOOK_SECRET || '' }}"
+              "value1": "={{ Boolean($env.INVOICE_WEBHOOK_SECRET && $env.INVOICE_WEBHOOK_SECRET.trim().length > 0 && $json.headers && $json.headers['x-webhook-token'] && $json.headers['x-webhook-token'].trim().length > 0 && $json.headers['x-webhook-token'].trim() === $env.INVOICE_WEBHOOK_SECRET.trim()) }}",
+              "value2": true
             }
           ]
         }
@@ -104,7 +103,7 @@
     },
     {
       "parameters": {
-        "jsCode": "// Anomaly & Fraud Scoring Engine\nconst crypto = require('crypto');\nconst invoice = $input.item.json;\nconst vendor = $('HTTP: Fetch Vendor Master').item.json;\nlet riskScore = 0;\nconst flags = [];\n\nconst fingerprint = crypto.createHash('sha256').update(`${invoice.vendor_id}::${invoice.invoice_number}`).digest('hex');\n\n// Bank divergence check (BEC protection)\nconst masterBank = String(vendor.bank_account_number || '').trim();\nconst invoiceBank = String(invoice.bank_details?.account_number || '').trim();\nif (masterBank && invoiceBank && masterBank !== invoiceBank) {\n  riskScore += 80;\n  flags.push('VENDOR_BANK_ACCOUNT_MISMATCH');\n}\n\n// PO status check\nif (!invoice.po_matched) {\n  riskScore += 40;\n  flags.push(`PO_${invoice.po_status}`);\n}\n\n// Threshold governance\nif (invoice.total_amount >= 50000) {\n  riskScore += 25;\n  flags.push('CFO_APPROVAL_REQUIRED');\n} else if (invoice.total_amount >= 10000) {\n  riskScore += 15;\n  flags.push('DIRECTOR_APPROVAL_REQUIRED');\n} else if (invoice.total_amount >= 2500) {\n  riskScore += 10;\n  flags.push('MANAGER_APPROVAL_REQUIRED');\n}\n\nlet decision = 'AUTO_APPROVED';\nif (riskScore >= 70) {\n  decision = 'REJECTED_FRAUD_ALERT';\n} else if (riskScore >= 20 || invoice.total_amount >= 2500 || !invoice.po_matched) {\n  decision = 'MANUAL_AUDIT_REQUIRED';\n}\n\nreturn { json: { ...invoice, fingerprint, risk_score: riskScore, decision, flags } };"
+        "jsCode": "// Anomaly & Fraud Scoring Engine\nconst crypto = require('crypto');\nconst invoice = $input.item.json;\nconst vendor = $('HTTP: Fetch Vendor Master').item.json;\nlet riskScore = 0;\nconst flags = [];\n\nconst fingerprint = crypto.createHash('sha256').update(`${invoice.vendor_id}::${invoice.invoice_number}`).digest('hex');\n\n// Bank divergence check & missing/unverified bank protection\nconst masterBank = String(vendor.bank_account_number || '').trim();\nconst invoiceBank = String(invoice.bank_details?.account_number || '').trim();\nif (!masterBank || !invoiceBank) {\n  riskScore += 40;\n  flags.push('UNVERIFIED_BANK_DETAILS');\n} else if (masterBank !== invoiceBank) {\n  riskScore += 80;\n  flags.push('VENDOR_BANK_ACCOUNT_MISMATCH');\n}\n\n// Line-item arithmetic validation check\nif (invoice.math_valid === false) {\n  riskScore += 50;\n  flags.push('ARITHMETIC_RECONCILIATION_FAILED');\n}\n\n// PO status check\nif (!invoice.po_matched) {\n  riskScore += 40;\n  flags.push(`PO_${invoice.po_status}`);\n}\n\n// Threshold governance\nif (invoice.total_amount >= 50000) {\n  riskScore += 25;\n  flags.push('CFO_APPROVAL_REQUIRED');\n} else if (invoice.total_amount >= 10000) {\n  riskScore += 15;\n  flags.push('DIRECTOR_APPROVAL_REQUIRED');\n} else if (invoice.total_amount >= 2500) {\n  riskScore += 10;\n  flags.push('MANAGER_APPROVAL_REQUIRED');\n}\n\nlet decision = 'AUTO_APPROVED';\nif (riskScore >= 70) {\n  decision = 'REJECTED_FRAUD_ALERT';\n} else if (riskScore >= 20 || invoice.total_amount >= 2500 || !invoice.po_matched || invoice.math_valid === false || !masterBank || !invoiceBank) {\n  decision = 'MANUAL_AUDIT_REQUIRED';\n}\n\n// Strict Invariant: Math errors or unverified bank details CANNOT qualify for AUTO_APPROVED\nif ((invoice.math_valid === false || !masterBank || !invoiceBank) && decision === 'AUTO_APPROVED') {\n  decision = 'MANUAL_AUDIT_REQUIRED';\n}\n\nreturn { json: { ...invoice, fingerprint, risk_score: riskScore, decision, flags } };"
       },
       "id": "node-7-anomaly-engine",
       "name": "Code: Anomaly & Fraud Engine",
@@ -143,7 +142,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'AUTO_APPROVED', risk_score: $json.risk_score }) }}"
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'AUTO_APPROVED', risk_score: $json.risk_score, flags: $json.flags }) }}"
       },
       "id": "node-9-ledger-auto-approved",
       "name": "HTTP: Post Ledger (Auto-Approved)",
@@ -164,7 +163,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'MANUAL_AUDIT_REQUIRED', risk_score: $json.risk_score }) }}"
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'MANUAL_AUDIT_REQUIRED', risk_score: $json.risk_score, flags: $json.flags }) }}"
       },
       "id": "node-10-ledger-manual-audit",
       "name": "HTTP: Post Ledger (Manual Audit)",
@@ -185,7 +184,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'REJECTED_FRAUD_ALERT', risk_score: $json.risk_score }) }}"
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'REJECTED_FRAUD_ALERT', risk_score: $json.risk_score, flags: $json.flags }) }}"
       },
       "id": "node-11-ledger-fraud-alert",
       "name": "HTTP: Post Ledger (Fraud Alert)",
@@ -206,7 +205,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: '#sec-fraud-alerts', type: 'CRITICAL_FRAUD', message: 'CRITICAL AP FRAUD ALERT: Invoice #' + ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN') + ' from Vendor ' + ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') + ' flagged with risk score ' + ($('Code: Anomaly & Fraud Engine').item.json.risk_score || 0) + '. Flags: ' + (($('Code: Anomaly & Fraud Engine').item.json.flags || []).join(', ')) }) }}"
+        "jsonBody": "={{ JSON.stringify({ channel: '#sec-fraud-alerts', type: 'CRITICAL_FRAUD', invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), message: 'CRITICAL AP FRAUD ALERT: Invoice #' + ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN') + ' from Vendor ' + ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') + ' flagged with risk score ' + ($('Code: Anomaly & Fraud Engine').item.json.risk_score || 0) + '. Flags: ' + (($('Code: Anomaly & Fraud Engine').item.json.flags || []).join(', ')), metadata: { invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), vendor_id: ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') } }) }}"
       },
       "id": "node-12-mock-fraud-alert",
       "name": "HTTP: Dispatch Fraud Alert",
@@ -227,7 +226,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ channel: '#ap-audit-queue', type: 'MANUAL_AUDIT', message: 'AP Manual Review Required: Invoice #' + ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN') + ' ($' + ($('Code: Validate Math & Tax').item.json.total_amount || 0) + ') needs review. Reason: ' + (($('Code: Anomaly & Fraud Engine').item.json.flags || []).join(', ')) }) }}"
+        "jsonBody": "={{ JSON.stringify({ channel: '#ap-audit-queue', type: 'MANUAL_AUDIT', invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), message: 'AP Manual Review Required: Invoice #' + ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN') + ' ($' + ($('Code: Validate Math & Tax').item.json.total_amount || 0) + ') needs review. Reason: ' + (($('Code: Anomaly & Fraud Engine').item.json.flags || []).join(', ')), metadata: { invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), vendor_id: ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') } }) }}"
       },
       "id": "node-13-mock-audit-queue",
       "name": "HTTP: Dispatch Audit Queue Notice",
@@ -238,7 +237,7 @@
     {
       "parameters": {
         "respondWith": "json",
-        "responseBody": "={{ JSON.stringify({ status: 'PROCESSED', decision: ($json.record ? $json.record.decision : ($('Code: Anomaly & Fraud Engine').item.json.decision || $json.decision)), risk_score: ($json.record ? $json.record.risk_score : ($('Code: Anomaly & Fraud Engine').item.json.risk_score !== undefined ? $('Code: Anomaly & Fraud Engine').item.json.risk_score : $json.risk_score)), invoice_number: ($json.record ? $json.record.invoice_number : ($('Code: Validate Math & Tax').item.json.invoice_number || $json.invoice_number)) }) }}"
+        "responseBody": "={{ JSON.stringify({ status: 'PROCESSED', decision: ($json.record ? $json.record.decision : ($('Code: Anomaly & Fraud Engine').item.json.decision || $json.decision)), risk_score: ($json.record ? $json.record.risk_score : ($('Code: Anomaly & Fraud Engine').item.json.risk_score !== undefined ? $('Code: Anomaly & Fraud Engine').item.json.risk_score : $json.risk_score)), invoice_number: ($json.record ? $json.record.invoice_number : ($('Code: Validate Math & Tax').item.json.invoice_number || $json.invoice_number)), flags: ($json.record && $json.record.flags ? $json.record.flags : ($('Code: Anomaly & Fraud Engine').item.json.flags || [])) }) }}"
       },
       "id": "node-14-respond-webhook",
       "name": "Respond to Webhook",

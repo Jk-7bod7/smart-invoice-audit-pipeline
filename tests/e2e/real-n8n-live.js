@@ -4,14 +4,19 @@
  * Executes real HTTP requests against the actual running n8n container and Mock ERP service:
  * 1. Boots isolated Docker Compose stack with high-entropy secrets
  * 2. Imports and publishes workflow in n8n container
- * 3. Asserts HTTP 401 on unauthorized ingress (zero ERP ledger side effects)
- * 4. Asserts valid invoice processing (PO match, AUTO_APPROVED status)
- * 5. Asserts duplicate invoice rejection (cryptographic fingerprinting)
- * 6. Asserts bank-account mismatch detection (BEC defense, REJECTED_FRAUD_ALERT)
- * 7. Asserts purchase-order budget overrun detection (MANUAL_AUDIT_REQUIRED)
- * 8. Asserts mock notification delivery to ERP notification store
- * 9. Asserts correct persistence behavior in ERP audit log
- * 10. Cleanly tears down isolated compose resources
+ * 3. Asserts zero-trust auth gate: missing, blank (""), whitespace ("   "), and invalid tokens return HTTP 401
+ * 4. Asserts zero ledger side-effects in ERP after unauthorized ingress attempts
+ * 5. Asserts valid clean invoice processing (PO match, AUTO_APPROVED status)
+ * 6. Asserts idempotent replay: identical resubmission produces zero duplicate ledger records and zero alert storms
+ * 7. Asserts conflicting invoice submission (same identity, modified data) detected and rejected (HTTP 409)
+ * 8. Asserts bank-account mismatch detection (BEC defense, REJECTED_FRAUD_ALERT)
+ * 9. Asserts business invariant: missing/unverified vendor bank details CANNOT qualify for AUTO_APPROVED (MANUAL_AUDIT_REQUIRED)
+ * 10. Asserts business invariant: arithmetic reconciliation failure CANNOT qualify for AUTO_APPROVED (MANUAL_AUDIT_REQUIRED)
+ * 11. Asserts purchase-order budget overrun detection (MANUAL_AUDIT_REQUIRED)
+ * 12. Asserts mock notification delivery to ERP notification store (#sec-fraud-alerts and #ap-audit-queue)
+ * 13. Asserts storage architecture classification: IN_MEMORY_TRANSIENT (non-persistent across restarts)
+ * 14. Asserts correct auditable persistence behavior in ERP audit trail
+ * 15. Cleanly tears down isolated compose resources
  */
 
 const http = require('node:http');
@@ -158,7 +163,6 @@ async function runLiveN8nE2E() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' }
       }, {});
-      console.log(`Probe ${p}: status=${probe.statusCode}, body=${probe.rawBody}`);
       if (probe.statusCode !== 404) {
         console.log(`✓ Webhook endpoint active (received HTTP ${probe.statusCode}).`);
         break;
@@ -167,23 +171,44 @@ async function runLiveN8nE2E() {
     }
 
     // -------------------------------------------------------------------------
-    // TEST 1: Invalid / Missing Authentication -> HTTP 401
+    // TEST 1: Zero-Trust Webhook Ingress Authentication Gate (Missing, Blank, Whitespace, Invalid)
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 1: Missing Authentication Header...');
-    const resUnauth = await makeRequest(N8N_URL, {
+    console.log('\nExecuting Test 1: Zero-Trust Ingress Authentication Gate...');
+    
+    // 1a. Missing token header
+    const resNoToken = await makeRequest(N8N_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' }
     }, { invoice_number: 'ATTACK-100', vendor_id: 'VEND-001' });
+    assert.strictEqual(resNoToken.statusCode, 401, `Expected HTTP 401 on missing auth token, got ${resNoToken.statusCode}`);
 
-    assert.strictEqual(resUnauth.statusCode, 401, `Expected HTTP 401 on missing auth, got ${resUnauth.statusCode}`);
-    console.log('✓ Test 1: Unauthenticated request rejected with HTTP 401.');
+    // 1b. Empty string token
+    const resEmptyToken = await makeRequest(N8N_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-webhook-token': '' }
+    }, { invoice_number: 'ATTACK-101', vendor_id: 'VEND-001' });
+    assert.strictEqual(resEmptyToken.statusCode, 401, `Expected HTTP 401 on empty string auth token, got ${resEmptyToken.statusCode}`);
+
+    // 1c. Whitespace-only token
+    const resWhitespaceToken = await makeRequest(N8N_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-webhook-token': '   \t  ' }
+    }, { invoice_number: 'ATTACK-102', vendor_id: 'VEND-001' });
+    assert.strictEqual(resWhitespaceToken.statusCode, 401, `Expected HTTP 401 on whitespace auth token, got ${resWhitespaceToken.statusCode}`);
+
+    // 1d. Invalid token
+    const resBadToken = await makeRequest(N8N_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', 'x-webhook-token': 'invalid-spoofed-token-xyz' }
+    }, { invoice_number: 'ATTACK-103', vendor_id: 'VEND-001' });
+    assert.strictEqual(resBadToken.statusCode, 401, `Expected HTTP 401 on invalid auth token, got ${resBadToken.statusCode}`);
 
     // Verify zero invoices in Mock ERP ledger
     const auditAfterUnauth = await makeRequest(`${ERP_BASE_URL}/api/invoices/audit-log`, {
       headers: { 'x-erp-api-key': TEST_ERP_KEY }
     });
-    assert.strictEqual(auditAfterUnauth.json.count, 0, 'No ledger entries must be created on 401');
-    console.log('✓ Verified: Zero side-effects in ERP ledger after unauthenticated request.');
+    assert.strictEqual(auditAfterUnauth.json.count, 0, 'No ledger entries must be created on 401 rejections');
+    console.log('✓ Test 1: Zero-trust auth gate strictly enforced (401 on missing, empty, whitespace, and invalid tokens; 0 ledger side-effects).');
 
     // -------------------------------------------------------------------------
     // TEST 2: Valid Clean Invoice -> Processed & AUTO_APPROVED
@@ -201,7 +226,6 @@ async function runLiveN8nE2E() {
       }
     }, cleanInvoice);
 
-    console.log(`Test 2 received status ${resClean.statusCode}, body:`, resClean.rawBody);
     if (resClean.statusCode !== 200) {
       console.log('--- N8N CONTAINER LOGS ---');
       try {
@@ -214,12 +238,25 @@ async function runLiveN8nE2E() {
 
     assert.strictEqual(resClean.statusCode, 200, `Expected HTTP 200, got ${resClean.statusCode}`);
     assert.strictEqual(resClean.json.decision, 'AUTO_APPROVED', `Expected AUTO_APPROVED, got ${resClean.json.decision}`);
-    console.log('✓ Test 2: Valid invoice processed through live n8n workflow and AUTO_APPROVED.');
+    
+    // Verify invoice is recorded in ERP
+    const erpInvoicesRes = await makeRequest(`${ERP_BASE_URL}/api/invoices`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    });
+    assert.strictEqual(erpInvoicesRes.statusCode, 200);
+    assert.strictEqual(erpInvoicesRes.json.count, 1, 'Expected exactly 1 invoice recorded in ERP ledger');
+    assert.strictEqual(erpInvoicesRes.json.invoices[0].invoice_number, 'INV-2026-001');
+    assert.strictEqual(erpInvoicesRes.json.invoices[0].decision, 'AUTO_APPROVED');
+    console.log('✓ Test 2: Valid invoice processed through live n8n workflow and recorded in ERP as AUTO_APPROVED.');
 
     // -------------------------------------------------------------------------
-    // TEST 3: Duplicate Invoice Submission -> REJECTED_FRAUD_ALERT
+    // TEST 3: Idempotent Replay (Zero Duplicate Ledger Records & Zero Duplicate Notifications)
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 3: Duplicate Invoice Submission...');
+    console.log('\nExecuting Test 3: Idempotent Replay Verification...');
+    const notifsBeforeReplay = (await makeRequest(`${ERP_BASE_URL}/api/notifications`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    })).json.count;
+
     const resDuplicate = await makeRequest(N8N_URL, {
       method: 'POST',
       headers: {
@@ -228,13 +265,127 @@ async function runLiveN8nE2E() {
       }
     }, cleanInvoice);
 
-    assert.strictEqual(resDuplicate.statusCode, 200, `Expected HTTP 200, got ${resDuplicate.statusCode}`);
-    console.log(`✓ Test 3: Duplicate submission evaluated (Decision: ${resDuplicate.json.decision}).`);
+    assert.strictEqual(resDuplicate.statusCode, 200, `Expected HTTP 200 on replay, got ${resDuplicate.statusCode}`);
+
+    // Verify invoice count did NOT increase
+    const erpInvoicesAfterReplay = await makeRequest(`${ERP_BASE_URL}/api/invoices`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    });
+    assert.strictEqual(erpInvoicesAfterReplay.json.count, 1, 'Invoice count must NOT increase on idempotent replay');
+
+    // Verify notification count did NOT increase
+    const notifsAfterReplay = (await makeRequest(`${ERP_BASE_URL}/api/notifications`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    })).json.count;
+    assert.strictEqual(notifsAfterReplay, notifsBeforeReplay, 'Notification count must NOT increase on idempotent replay');
+    console.log('✓ Test 3: Idempotent replay verified (zero duplicate ledger records and zero alert flood).');
 
     // -------------------------------------------------------------------------
-    // TEST 4: Bank Account Mismatch (BEC Fraud Defense) -> REJECTED_FRAUD_ALERT
+    // TEST 4: Conflicting Invoice Submission (Same Identity, Tampered Total) -> HTTP 409
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 4: Bank Account Mismatch (Fraud Injection)...');
+    console.log('\nExecuting Test 4: Conflicting Invoice Submission Detection...');
+    const conflictingInvoicePayload = {
+      fingerprint: 'altered_fingerprint_hash_9999',
+      invoice_number: 'INV-2026-001',
+      vendor_id: 'VEND-001',
+      total_amount: 9999.00, // Altered total!
+      decision: 'REJECTED_FRAUD_ALERT',
+      risk_score: 95
+    };
+
+    const conflictRes = await makeRequest(`${ERP_BASE_URL}/api/invoices`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-erp-api-key': TEST_ERP_KEY
+      }
+    }, conflictingInvoicePayload);
+
+    assert.strictEqual(conflictRes.statusCode, 409, `Expected HTTP 409 on conflicting invoice, got ${conflictRes.statusCode}`);
+    assert.strictEqual(conflictRes.json.status, 'CONFLICTING_IDENTITY_REJECTED');
+    assert.strictEqual(conflictRes.json.decision, 'REJECTED_FRAUD_ALERT');
+
+    // Verify original invoice in ERP ledger remains intact with original total
+    const checkOriginal = await makeRequest(`${ERP_BASE_URL}/api/invoices`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    });
+    const origRecord = checkOriginal.json.invoices.find(i => i.invoice_number === 'INV-2026-001');
+    assert.strictEqual(origRecord.total_amount, 1850.00, 'Original record total must remain intact and uncorrupted');
+    console.log('✓ Test 4: Conflicting invoice submission safely rejected (HTTP 409; original record protected).');
+
+    // -------------------------------------------------------------------------
+    // TEST 5: Business Invariant: Invalid Arithmetic Cannot Reach AUTO_APPROVED
+    // -------------------------------------------------------------------------
+    console.log('\nExecuting Test 5: Invariant Check - Invalid Arithmetic Rejection...');
+    const mathErrorInvoice = {
+      ...cleanInvoice,
+      invoice_number: 'INV-ARITH-FAIL-001',
+      subtotal: 1000.00,
+      tax_amount: 100.00,
+      total_amount: 500.00 // Mismatch: 1000 + 100 != 500
+    };
+
+    const resMath = await makeRequest(N8N_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-webhook-token': TEST_WEBHOOK_SECRET
+      }
+    }, mathErrorInvoice);
+
+    assert.strictEqual(resMath.statusCode, 200, `Expected HTTP 200, got ${resMath.statusCode}`);
+    assert.notStrictEqual(resMath.json.decision, 'AUTO_APPROVED', 'Invoice with invalid arithmetic MUST NOT be AUTO_APPROVED');
+    assert.strictEqual(resMath.json.decision, 'MANUAL_AUDIT_REQUIRED', `Expected MANUAL_AUDIT_REQUIRED, got ${resMath.json.decision}`);
+    assert(resMath.json.flags.includes('ARITHMETIC_RECONCILIATION_FAILED'), 'Flags must contain ARITHMETIC_RECONCILIATION_FAILED');
+
+    // Verify in ERP audit log that it was recorded with decision MANUAL_AUDIT_REQUIRED
+    const auditLogsAfterMath = (await makeRequest(`${ERP_BASE_URL}/api/invoices/audit-log`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    })).json.audit_logs;
+    const mathLog = auditLogsAfterMath.find(l => l.invoice_number === 'INV-ARITH-FAIL-001');
+    assert.ok(mathLog, 'Audit log entry must exist for INV-ARITH-FAIL-001');
+    assert.strictEqual(mathLog.decision, 'MANUAL_AUDIT_REQUIRED', 'Audit log must record MANUAL_AUDIT_REQUIRED');
+    console.log('✓ Test 5: Invariant verified - Invalid invoice arithmetic routed to MANUAL_AUDIT_REQUIRED (never AUTO_APPROVED).');
+
+    // -------------------------------------------------------------------------
+    // TEST 6: Business Invariant: Missing / Unverified Bank Details Cannot Reach AUTO_APPROVED
+    // -------------------------------------------------------------------------
+    console.log('\nExecuting Test 6: Invariant Check - Missing/Unverified Bank Details...');
+    const unverifiedBankInvoice = {
+      ...cleanInvoice,
+      invoice_number: 'INV-NO-BANK-001',
+      bank_details: {
+        bank_name: 'Unknown Offshore Bank',
+        account_number: '' // Missing bank account
+      }
+    };
+
+    const resBankMissing = await makeRequest(N8N_URL, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-webhook-token': TEST_WEBHOOK_SECRET
+      }
+    }, unverifiedBankInvoice);
+
+    assert.strictEqual(resBankMissing.statusCode, 200, `Expected HTTP 200, got ${resBankMissing.statusCode}`);
+    assert.notStrictEqual(resBankMissing.json.decision, 'AUTO_APPROVED', 'Invoice with missing bank details MUST NOT be AUTO_APPROVED');
+    assert.strictEqual(resBankMissing.json.decision, 'MANUAL_AUDIT_REQUIRED', `Expected MANUAL_AUDIT_REQUIRED, got ${resBankMissing.json.decision}`);
+    assert(resBankMissing.json.flags.includes('UNVERIFIED_BANK_DETAILS'), 'Flags must contain UNVERIFIED_BANK_DETAILS');
+
+    // Verify in ERP audit log
+    const auditLogsAfterBank = (await makeRequest(`${ERP_BASE_URL}/api/invoices/audit-log`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    })).json.audit_logs;
+    const bankLog = auditLogsAfterBank.find(l => l.invoice_number === 'INV-NO-BANK-001');
+    assert.ok(bankLog, 'Audit log entry must exist for INV-NO-BANK-001');
+    assert.strictEqual(bankLog.decision, 'MANUAL_AUDIT_REQUIRED');
+    console.log('✓ Test 6: Invariant verified - Missing/unverified bank details routed to MANUAL_AUDIT_REQUIRED (never AUTO_APPROVED).');
+
+    // -------------------------------------------------------------------------
+    // TEST 7: Bank Account Mismatch (BEC Fraud Defense) -> REJECTED_FRAUD_ALERT
+    // -------------------------------------------------------------------------
+    console.log('\nExecuting Test 7: Bank Account Mismatch (Fraud Injection)...');
     const fraudInvoice = JSON.parse(
       fs.readFileSync(path.join(__dirname, '../../sample-data/bank-mismatch-fraud-invoice.json'), 'utf8')
     );
@@ -249,12 +400,12 @@ async function runLiveN8nE2E() {
 
     assert.strictEqual(resFraud.statusCode, 200, `Expected HTTP 200, got ${resFraud.statusCode}`);
     assert.strictEqual(resFraud.json.decision, 'REJECTED_FRAUD_ALERT', `Expected REJECTED_FRAUD_ALERT, got ${resFraud.json.decision}`);
-    console.log('✓ Test 4: Bank account mismatch caught by live n8n workflow and REJECTED_FRAUD_ALERT returned.');
+    console.log('✓ Test 7: Bank account mismatch caught by live n8n workflow and REJECTED_FRAUD_ALERT returned.');
 
     // -------------------------------------------------------------------------
-    // TEST 5: Purchase Order Overrun -> MANUAL_AUDIT_REQUIRED
+    // TEST 8: Purchase Order Overrun -> MANUAL_AUDIT_REQUIRED
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 5: Purchase Order Overrun...');
+    console.log('\nExecuting Test 8: Purchase Order Overrun...');
     const overrunInvoice = JSON.parse(
       fs.readFileSync(path.join(__dirname, '../../sample-data/budget-overrun-invoice.json'), 'utf8')
     );
@@ -269,12 +420,12 @@ async function runLiveN8nE2E() {
 
     assert.strictEqual(resOverrun.statusCode, 200, `Expected HTTP 200, got ${resOverrun.statusCode}`);
     assert.strictEqual(resOverrun.json.decision, 'MANUAL_AUDIT_REQUIRED', `Expected MANUAL_AUDIT_REQUIRED, got ${resOverrun.json.decision}`);
-    console.log('✓ Test 5: PO overrun routed to MANUAL_AUDIT_REQUIRED by live n8n workflow.');
+    console.log('✓ Test 8: PO overrun routed to MANUAL_AUDIT_REQUIRED by live n8n workflow.');
 
     // -------------------------------------------------------------------------
-    // TEST 6: Mock Notification Delivery
+    // TEST 9: Mock Notification Delivery to Dedicated Queues
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 6: Verifying Mock Notification Delivery...');
+    console.log('\nExecuting Test 9: Verifying Mock Notification Delivery...');
     const notifRes = await makeRequest(`${ERP_BASE_URL}/api/notifications`, {
       headers: { 'x-erp-api-key': TEST_ERP_KEY }
     });
@@ -282,18 +433,31 @@ async function runLiveN8nE2E() {
     assert(notifRes.json.count >= 2, `Expected at least 2 notifications, got ${notifRes.json.count}`);
     assert(notifRes.json.notifications.some(n => n.channel === '#sec-fraud-alerts'), 'Expected notification to #sec-fraud-alerts');
     assert(notifRes.json.notifications.some(n => n.channel === '#ap-audit-queue'), 'Expected notification to #ap-audit-queue');
-    console.log(`✓ Test 6: Mock notifications verified in ERP notification store (${notifRes.json.count} delivered).`);
+    console.log(`✓ Test 9: Mock notifications verified in ERP notification store (${notifRes.json.count} delivered).`);
 
     // -------------------------------------------------------------------------
-    // TEST 7: Correct Persistence Behavior
+    // TEST 10: In-Memory Storage & Persistence Architecture Transparency
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 7: Verifying ERP Ledger Persistence...');
+    console.log('\nExecuting Test 10: Verifying Storage Architecture Classification...');
+    const storageRes = await makeRequest(`${ERP_BASE_URL}/api/system/storage-info`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    });
+    assert.strictEqual(storageRes.statusCode, 200);
+    assert.strictEqual(storageRes.json.storage_type, 'IN_MEMORY_TRANSIENT');
+    assert.strictEqual(storageRes.json.persistent_across_restarts, false);
+    assert.strictEqual(storageRes.json.audit_trail_scope, 'EPHEMERAL_PER_CONTAINER_SESSION');
+    console.log('✓ Test 10: Storage architecture accurately declared and verified as IN_MEMORY_TRANSIENT (non-persistent).');
+
+    // -------------------------------------------------------------------------
+    // TEST 11: Correct Persistence & Audit Trail Behavior
+    // -------------------------------------------------------------------------
+    console.log('\nExecuting Test 11: Verifying ERP Ledger Persistence & Audit Trail...');
     const auditRes = await makeRequest(`${ERP_BASE_URL}/api/invoices/audit-log`, {
       headers: { 'x-erp-api-key': TEST_ERP_KEY }
     });
     assert.strictEqual(auditRes.statusCode, 200);
-    assert(auditRes.json.count >= 3, `Expected at least 3 audit log events, got ${auditRes.json.count}`);
-    console.log(`✓ Test 7: Persistence verified in ERP ledger audit trail (${auditRes.json.count} events logged).`);
+    assert(auditRes.json.count >= 5, `Expected at least 5 audit log events, got ${auditRes.json.count}`);
+    console.log(`✓ Test 11: Persistence verified in ERP ledger audit trail (${auditRes.json.count} events logged).`);
 
     console.log('\n================================================================');
     console.log('  ALL LIVE DOCKER + N8N E2E TESTS PASSED (100% VERIFIED)');

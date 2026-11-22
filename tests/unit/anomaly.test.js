@@ -102,4 +102,30 @@ const mockInvoice = {
   console.log('✓ Test 5 Passed: Two-Way PO Matcher correctly identifies under-budget and overrun');
 }
 
+// Test 6: Invariant - Arithmetic reconciliation failure CANNOT qualify for AUTO_APPROVED
+{
+  const mathErrorInvoice = {
+    ...mockInvoice,
+    math_valid: false
+  };
+  const result = AnomalyDetector.evaluate(mathErrorInvoice, mockVendor, new Set());
+  assert.notStrictEqual(result.decision, 'AUTO_APPROVED', 'Invoice with math errors must never be auto-approved');
+  assert.strictEqual(result.decision, 'MANUAL_AUDIT_REQUIRED');
+  assert(result.anomalies.some(a => a.code === 'ARITHMETIC_RECONCILIATION_FAILED'));
+  console.log('✓ Test 6 Passed: Invariant verified - Failed arithmetic cannot qualify for AUTO_APPROVED');
+}
+
+// Test 7: Invariant - Missing or unverified bank details CANNOT qualify for AUTO_APPROVED
+{
+  const missingBankInvoice = {
+    ...mockInvoice,
+    bank_details: {} // Missing account number
+  };
+  const result = AnomalyDetector.evaluate(missingBankInvoice, mockVendor, new Set());
+  assert.notStrictEqual(result.decision, 'AUTO_APPROVED', 'Invoice with unverified bank details must never be auto-approved');
+  assert.strictEqual(result.decision, 'MANUAL_AUDIT_REQUIRED');
+  assert(result.anomalies.some(a => a.code === 'UNVERIFIED_BANK_DETAILS'));
+  console.log('✓ Test 7 Passed: Invariant verified - Missing bank details cannot qualify for AUTO_APPROVED');
+}
+
 console.log('All Unit Tests (Anomaly & PO Matching) Passed Successfully.\n');

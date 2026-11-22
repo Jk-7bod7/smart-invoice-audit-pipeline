@@ -185,6 +185,38 @@ function rawRequest(options, body = null) {
       console.log('✓ Test 8 Passed: SQL injection payload safely stored as inert string');
     }
 
+    // Test 9: Zero-Trust Auth Invariant - Blank / whitespace header rejected with HTTP 401
+    {
+      const resBlank = await rawRequest({
+        method: 'GET',
+        path: '/api/vendors/VEND-001',
+        headers: { 'x-erp-api-key': '   ' }
+      });
+      assert.strictEqual(resBlank.status, 401);
+      console.log('✓ Test 9 Passed: Blank/whitespace auth header rejected with HTTP 401');
+    }
+
+    // Test 10: Arithmetic Invariant - Calculation mismatch rejected by validator
+    {
+      const badMathInvoice = {
+        invoice_number: 'INV-MATH-ERR-001',
+        vendor_id: 'VEND-001',
+        invoice_date: '2026-11-01T00:00:00Z',
+        due_date: '2026-12-01T00:00:00Z',
+        currency: 'USD',
+        line_items: [{ description: 'Compute', quantity: 2, unit_price: 100 }], // calculated subtotal: 200
+        subtotal: 150, // declared subtotal: 150 (mismatch!)
+        tax_amount: 15,
+        total_amount: 165,
+        bank_details: { account_number: 'US-BANK-99887711' }
+      };
+      assert.throws(
+        () => validateInvoice(badMathInvoice),
+        err => err instanceof ValidationError && err.field === 'subtotal'
+      );
+      console.log('✓ Test 10 Passed: Subtotal calculation mismatch strictly rejected by validator');
+    }
+
     console.log('All Adversarial & Negative Security Tests Passed Successfully.\n');
   } catch (err) {
     console.error('Negative Security Test Failure:', err);

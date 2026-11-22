@@ -112,3 +112,45 @@ Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/notifications" -Method Get -He
 *Expected Result:*
 - Channel `#sec-fraud-alerts` receives critical alerts on bank account divergence and duplicate submissions.
 - Channel `#ap-audit-queue` receives triage alerts on purchase order overruns and high-value approvals.
+- Replaying identical invoices triggers zero duplicate notifications (alert storm suppression).
+
+---
+
+### Step 7: Storage Architecture & Persistence Transparency
+Inspect the system storage classification endpoint:
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/system/storage-info" -Method Get -Headers $headers | ConvertTo-Json
+```
+
+*Expected Result:*
+- `storage_type`: `IN_MEMORY_TRANSIENT`
+- `persistent_across_restarts`: `false`
+- `audit_trail_scope`: `EPHEMERAL_PER_CONTAINER_SESSION`
+- Transparent warning that state resets upon container/process restart.
+
+---
+
+### Step 8: Conflicting Identity Detection & Rejection
+Submit an invoice with an existing `vendor_id::invoice_number` identity, but modified financial data ($9,999 vs $1,850):
+
+```powershell
+$conflictPayload = @{
+  fingerprint    = "tampered_hash_9999"
+  invoice_number = "INV-2026-001"
+  vendor_id      = "VEND-001"
+  total_amount   = 9999.00
+  decision       = "REJECTED_FRAUD_ALERT"
+  risk_score     = 95
+} | ConvertTo-Json
+
+try {
+  Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices" -Method Post -Headers $headers -Body $conflictPayload
+} catch {
+  $_.Exception.Response.StatusCode # Returns 409 Conflict
+}
+```
+
+*Expected Result:*
+- HTTP 409 Conflict with `CONFLICTING_IDENTITY_REJECTED`.
+- The existing record in the ERP ledger remains uncorrupted at $1,850.00.

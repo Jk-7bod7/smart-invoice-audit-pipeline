@@ -121,6 +121,47 @@ function request(method, path, headers = {}, body = null) {
       console.log('✓ Test 6 Passed: Mock notification delivered and retrieved via GET /api/notifications');
     }
 
+    // Test 7: Conflicting Invoice Submission Detection (Same Identity, Divergent Data)
+    {
+      const conflictingInvoice = {
+        ...testInvoiceRecord,
+        total_amount: 9999.00 // Conflicting amount!
+      };
+      const conflictRes = await request('POST', '/api/invoices', {}, conflictingInvoice);
+      assert.strictEqual(conflictRes.status, 409, 'Expected HTTP 409 Conflict on altered invoice resubmission');
+      assert.strictEqual(conflictRes.data.status, 'CONFLICTING_IDENTITY_REJECTED');
+      assert.strictEqual(conflictRes.data.decision, 'REJECTED_FRAUD_ALERT');
+      // Verify original record was not corrupted
+      assert.strictEqual(conflictRes.data.record.total_amount, 1500.00);
+      console.log('✓ Test 7 Passed: Conflicting invoice submission safely detected and rejected (HTTP 409)');
+    }
+
+    // Test 8: Notification Deduplication (Zero Alert Storm on Replay)
+    {
+      const beforeCount = (await request('GET', '/api/notifications')).data.count;
+      const replayNotif = {
+        channel: '#sec-fraud-alerts',
+        type: 'CRITICAL_FRAUD',
+        message: 'Test fraud notification'
+      };
+      const postReplay = await request('POST', '/api/notifications', {}, replayNotif);
+      assert.strictEqual(postReplay.status, 200);
+      assert.strictEqual(postReplay.data.status, 'NOTIFICATION_ALREADY_DELIVERED');
+      const afterCount = (await request('GET', '/api/notifications')).data.count;
+      assert.strictEqual(afterCount, beforeCount, 'Notification count must not increase on replay');
+      console.log('✓ Test 8 Passed: Notification deduplication verified (zero duplicate alerts on replay)');
+    }
+
+    // Test 9: Storage Info & Persistence Classification
+    {
+      const storageRes = await request('GET', '/api/system/storage-info');
+      assert.strictEqual(storageRes.status, 200);
+      assert.strictEqual(storageRes.data.storage_type, 'IN_MEMORY_TRANSIENT');
+      assert.strictEqual(storageRes.data.persistent_across_restarts, false);
+      assert.strictEqual(storageRes.data.audit_trail_scope, 'EPHEMERAL_PER_CONTAINER_SESSION');
+      console.log('✓ Test 9 Passed: Storage classified accurately as IN_MEMORY_TRANSIENT (non-persistent)');
+    }
+
     console.log('All Integration Tests (Mock ERP API) Passed Successfully.\n');
   } catch (err) {
     console.error('Integration Test Failure:', err);

@@ -75,6 +75,15 @@ function createServer() {
       return sendJson(200, po);
     }
 
+    // GET /api/invoices
+    if (method === 'GET' && url.pathname === '/api/invoices') {
+      const records = Array.from(db.invoices.values());
+      return sendJson(200, {
+        count: records.length,
+        invoices: records
+      });
+    }
+
     // GET /api/invoices/audit-log
     if (method === 'GET' && url.pathname === '/api/invoices/audit-log') {
       return sendJson(200, {
@@ -92,6 +101,11 @@ function createServer() {
     }
 
     // POST /api/notifications (Mock Notification Ingestion)
+    // GET /api/system/storage-info (Storage Architecture & Persistence Classification)
+    if (method === 'GET' && url.pathname === '/api/system/storage-info') {
+      return sendJson(200, db.getStorageInfo());
+    }
+
     if (method === 'POST' && url.pathname === '/api/notifications') {
       let body = '';
       req.on('data', chunk => { body += chunk; });
@@ -101,8 +115,9 @@ function createServer() {
           notificationData = body ? JSON.parse(body) : {};
         } catch (_) {}
         const recorded = db.addNotification(notificationData);
-        return sendJson(201, {
-          status: 'NOTIFICATION_DELIVERED',
+        const status = recorded.duplicate ? 200 : 201;
+        return sendJson(status, {
+          status: recorded.duplicate ? 'NOTIFICATION_ALREADY_DELIVERED' : 'NOTIFICATION_DELIVERED',
           notification: recorded
         });
       });
@@ -166,21 +181,29 @@ function createServer() {
           });
         }
 
-        // Idempotency check: If already recorded, return existing record
-        if (db.hasFingerprint(fingerprint)) {
-          const existing = db.getInvoiceByFingerprint(fingerprint);
+        // Idempotency & Conflict Check via evaluateOrRecordInvoice
+        const evalResult = db.evaluateOrRecordInvoice(invoiceData);
+        if (evalResult.is_conflict) {
+          return sendJson(409, {
+            status: evalResult.status,
+            error: evalResult.error,
+            message: evalResult.message,
+            decision: evalResult.decision,
+            record: evalResult.record
+          });
+        }
+        if (evalResult.is_duplicate) {
           return sendJson(200, {
-            status: 'IDEMPOTENT_DUPLICATE_ACCEPTED',
-            message: 'Invoice already processed. Returning cached ledger record.',
-            record: existing
+            status: evalResult.status,
+            message: evalResult.message,
+            record: evalResult.record
           });
         }
 
-        const recorded = db.recordInvoice(invoiceData);
         return sendJson(201, {
-          status: 'INVOICE_RECORDED',
-          message: 'Invoice successfully ingested and recorded in ERP ledger.',
-          record: recorded
+          status: evalResult.status,
+          message: evalResult.message,
+          record: evalResult.record
         });
       });
 
