@@ -1,0 +1,287 @@
+{
+  "name": "Intelligent Accounts Payable (AP) Invoice Audit & Fraud Prevention Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "invoice-audit-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-1-webhook-ingress",
+      "name": "Webhook: Inbound Invoice Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [180, 300]
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "string": [
+            {
+              "value1": "={{ $json.headers['x-webhook-token'] }}",
+              "operation": "equal",
+              "value2": "={{ $env.INVOICE_WEBHOOK_SECRET }}"
+            }
+          ]
+        }
+      },
+      "id": "node-2-auth-check",
+      "name": "Verify Ingress Token",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [380, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Line-item math validation\nconst invoice = $input.item.json.body;\nlet subtotal = 0;\nfor (const item of invoice.line_items) {\n  subtotal += item.quantity * item.unit_price;\n}\nconst mathValid = Math.abs(subtotal - invoice.subtotal) < 0.01 && Math.abs((invoice.subtotal + invoice.tax_amount) - invoice.total_amount) < 0.01;\nreturn { json: { ...invoice, math_valid: mathValid } };"
+      },
+      "id": "node-3-math-validator",
+      "name": "Code: Validate Math & Tax",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [580, 200]
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:3002/api/vendors/{{ $json.vendor_id }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "node-4-vendor-lookup",
+      "name": "HTTP: Fetch Vendor Master",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [780, 200]
+    },
+    {
+      "parameters": {
+        "url": "=http://127.0.0.1:3002/api/purchase-orders/{{ $('Code: Validate Math & Tax').item.json.po_number }}",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "options": {}
+      },
+      "id": "node-5-po-lookup",
+      "name": "HTTP: Fetch Purchase Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [980, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two-way PO Matcher & Tolerance Check\nconst invoice = $('Code: Validate Math & Tax').item.json;\nconst po = $input.item.json;\nconst matched = po && po.status === 'APPROVED' && invoice.total_amount <= (po.total_amount * 1.01);\nreturn { json: { ...invoice, po_matched: matched, po_record: po } };"
+      },
+      "id": "node-6-po-matcher",
+      "name": "Code: Two-Way PO Matcher",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1180, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Anomaly & Fraud Scoring Engine\nconst invoice = $input.item.json;\nconst vendor = $('HTTP: Fetch Vendor Master').item.json;\nlet riskScore = 0;\nconst flags = [];\nif (vendor.bank_account_number !== invoice.bank_details.account_number) {\n  riskScore += 80;\n  flags.push('VENDOR_BANK_ACCOUNT_MISMATCH');\n}\nif (!invoice.po_matched) {\n  riskScore += 40;\n  flags.push('PO_UNMATCHED_OR_OVERRUN');\n}\nif (invoice.total_amount >= 10000) {\n  riskScore += 15;\n  flags.push('HIGH_VALUE_THRESHOLD');\n}\nlet decision = 'AUTO_APPROVED';\nif (riskScore >= 70) decision = 'REJECTED_FRAUD_ALERT';\nelse if (riskScore >= 20) decision = 'MANUAL_AUDIT_REQUIRED';\nreturn { json: { ...invoice, risk_score: riskScore, decision, flags } };"
+      },
+      "id": "node-7-anomaly-engine",
+      "name": "Code: Anomaly & Fraud Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1380, 200]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.decision }}",
+        "rules": {
+          "rules": [
+            { "value2": "AUTO_APPROVED", "output": 0 },
+            { "value2": "MANUAL_AUDIT_REQUIRED", "output": 1 },
+            { "value2": "REJECTED_FRAUD_ALERT", "output": 2 }
+          ]
+        }
+      },
+      "id": "node-8-decision-switch",
+      "name": "Switch: Triage Decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1580, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3002/api/invoices",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "invoice_number", "value": "={{ $json.invoice_number }}" },
+            { "name": "decision", "value": "AUTO_APPROVED" }
+          ]
+        }
+      },
+      "id": "node-9-ledger-auto-approved",
+      "name": "HTTP: Post Ledger (Auto-Approved)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1820, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3002/api/invoices",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "invoice_number", "value": "={{ $json.invoice_number }}" },
+            { "name": "decision", "value": "MANUAL_AUDIT_REQUIRED" }
+          ]
+        }
+      },
+      "id": "node-10-ledger-manual-audit",
+      "name": "HTTP: Post Ledger (Manual Audit)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1820, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://127.0.0.1:3002/api/invoices",
+        "bodyParameters": {
+          "parameters": [
+            { "name": "invoice_number", "value": "={{ $json.invoice_number }}" },
+            { "name": "decision", "value": "REJECTED_FRAUD_ALERT" }
+          ]
+        }
+      },
+      "id": "node-11-ledger-fraud-alert",
+      "name": "HTTP: Post Ledger (Fraud Alert)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1820, 400]
+    },
+    {
+      "parameters": {
+        "channel": "#sec-fraud-alerts",
+        "text": "=🚨 CRITICAL AP FRAUD ALERT: Invoice #{{ $json.invoice_number }} from Vendor {{ $json.vendor_id }} flagged with risk score {{ $json.risk_score }}. Flags: {{ $json.flags.join(', ') }}"
+      },
+      "id": "node-12-slack-fraud-alert",
+      "name": "Slack: Critical Fraud Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2060, 400]
+    },
+    {
+      "parameters": {
+        "channel": "#ap-audit-queue",
+        "text": "=⚠️ AP Manual Review Required: Invoice #{{ $json.invoice_number }} ($${{ $json.total_amount }}) needs review. Reason: {{ $json.flags.join(', ') }}"
+      },
+      "id": "node-13-slack-audit-queue",
+      "name": "Slack: Audit Queue Notification",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [2060, 250]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'PROCESSED', decision: $json.decision, risk_score: $json.risk_score }) }}"
+      },
+      "id": "node-14-respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2280, 250]
+    },
+    {
+      "parameters": {},
+      "id": "node-15-error-trigger",
+      "name": "Error Trigger: DLQ",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [180, 550]
+    },
+    {
+      "parameters": {
+        "channel": "#ap-pipeline-errors",
+        "text": "=🔥 PIPELINE DLQ ERROR: Execution {{ $execution.id }} failed. Error: {{ $json.execution.error.message }}"
+      },
+      "id": "node-16-dlq-notification",
+      "name": "Slack: Dead-Letter Queue Alert",
+      "type": "n8n-nodes-base.slack",
+      "typeVersion": 2.1,
+      "position": [420, 550]
+    }
+  ],
+  "connections": {
+    "Webhook: Inbound Invoice Intake": {
+      "main": [
+        [{ "node": "Verify Ingress Token", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verify Ingress Token": {
+      "main": [
+        [{ "node": "Code: Validate Math & Tax", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code: Validate Math & Tax": {
+      "main": [
+        [{ "node": "HTTP: Fetch Vendor Master", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Fetch Vendor Master": {
+      "main": [
+        [{ "node": "HTTP: Fetch Purchase Order", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Fetch Purchase Order": {
+      "main": [
+        [{ "node": "Code: Two-Way PO Matcher", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code: Two-Way PO Matcher": {
+      "main": [
+        [{ "node": "Code: Anomaly & Fraud Engine", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code: Anomaly & Fraud Engine": {
+      "main": [
+        [{ "node": "Switch: Triage Decision", "type": "main", "index": 0 }]
+      ]
+    },
+    "Switch: Triage Decision": {
+      "main": [
+        [{ "node": "HTTP: Post Ledger (Auto-Approved)", "type": "main", "index": 0 }],
+        [{ "node": "HTTP: Post Ledger (Manual Audit)", "type": "main", "index": 0 }],
+        [{ "node": "HTTP: Post Ledger (Fraud Alert)", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Post Ledger (Auto-Approved)": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Post Ledger (Manual Audit)": {
+      "main": [
+        [{ "node": "Slack: Audit Queue Notification", "type": "main", "index": 0 }]
+      ]
+    },
+    "Slack: Audit Queue Notification": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Post Ledger (Fraud Alert)": {
+      "main": [
+        [{ "node": "Slack: Critical Fraud Notification", "type": "main", "index": 0 }]
+      ]
+    },
+    "Slack: Critical Fraud Notification": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "Error Trigger: DLQ": {
+      "main": [
+        [{ "node": "Slack: Dead-Letter Queue Alert", "type": "main", "index": 0 }]
+      ]
+    }
+  }
+}

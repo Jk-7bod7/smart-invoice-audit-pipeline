@@ -1,0 +1,66 @@
+services:
+  mock-erp:
+    image: node:22-alpine
+    container_name: invoice-mock-erp
+    restart: unless-stopped
+    working_dir: /app
+    volumes:
+      - ./mock-erp:/app
+    environment:
+      - HOST=0.0.0.0
+      - ERP_PORT=3002
+      - ERP_API_KEY=${ERP_API_KEY:-erp_secret_test_key_8899aabbcc}
+      - NODE_ENV=production
+    ports:
+      - "127.0.0.1:3002:3002"
+    command: node server.js
+    networks:
+      - invoice-audit-net
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1:3002/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 256M
+
+  n8n:
+    image: n8nio/n8n:2.46.6
+    container_name: invoice-audit-n8n
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5679:5678"
+    environment:
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=http
+      - N8N_HOST=127.0.0.1
+      - WEBHOOK_URL=http://127.0.0.1:5679/
+      - GENERIC_TIMEZONE=UTC
+      - N8N_RUNNERS_ENABLED=true
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      - ERP_API_KEY=${ERP_API_KEY:-erp_secret_test_key_8899aabbcc}
+      - INVOICE_WEBHOOK_SECRET=${INVOICE_WEBHOOK_SECRET:-invoice_webhook_test_secret_1122}
+    volumes:
+      - n8n-invoice-storage:/home/node/.n8n
+      - ./workflow/invoice-audit-workflow.json:/workflows/workflow.json:ro
+    depends_on:
+      mock-erp:
+        condition: service_healthy
+    networks:
+      - invoice-audit-net
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 768M
+
+volumes:
+  n8n-invoice-storage:
+
+networks:
+  invoice-audit-net:
+    driver: bridge
