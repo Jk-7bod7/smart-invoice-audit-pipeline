@@ -1,6 +1,8 @@
 # Automated Test Evidence & Verification Ledger
 
 **Execution Timestamp:** 2026-11-22T13:45:39+02:00  
+**Commit SHA:** `891abeb` (`891abebd63fa7c91fb7876eed22656eaa812967c`)  
+**Branch:** `feature/intelligent-invoice-audit-pipeline`  
 **Test Runner:** `node run-all-tests.js`  
 **Execution Environment:** Windows 11 / Node.js v24.22.1 / Docker Desktop (Compose v2) / PowerShell 5.1  
 **Overall Status:** **100% PASSED (8 / 8 Test Suites Passing)**
