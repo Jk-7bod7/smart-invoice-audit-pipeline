@@ -1,48 +1,57 @@
-# Intelligent Accounts Payable (AP) Invoice Audit & Fraud Prevention Engine
+# Intelligent AP Invoice Audit — n8n + Node.js
 
-A zero-dependency reference implementation for automated inbound invoice ingestion, line-item mathematical verification, two-way Purchase Order (PO) matching, and fraud anomaly detection.
+**Portfolio reference implementation** for Accounts Payable (AP) invoice screening, purchase-order reconciliation and suspicious payment-detail checks. Built using **n8n, Node.js, Docker Compose and an isolated Mock ERP** with synthetic data.
 
----
+> **Demo only:** This repository is source code, **not** a hosted service, a certified financial control, or a production payment platform. No real payments are initiated.
 
-## 1. Core Engineering Highlights
-- **Mathematical Integrity:** Reconciles line-item quantities and unit prices against declared subtotal and tax amounts within $0.01 tolerance.
-- **BEC & Fraud Defense:** Detects divergence between invoice bank account details and ERP vendor master records.
-- **Two-Way PO Matching:** Compares invoice totals against approved purchase orders with configurable tolerance rules.
-- **Cryptographic Deduplication:** Generates deterministic SHA-256 fingerprints (`vendor_id::invoice_number`) to prevent duplicate payouts.
-- **Strict Security:** Loopback-only service binding (`127.0.0.1`), fail-closed header authentication, and bounded streaming request limits (256 KB).
+## What it demonstrates
 
----
+- Webhook intake protected by a non-empty shared token, with HTTP 401 for unauthorized requests.
+- Invoice subtotal/tax reconciliation and purchase-order matching.
+- Comparison of invoice bank details against a vendor master record.
+- Decision routing: `AUTO_APPROVED` (simulation only), `MANUAL_AUDIT_REQUIRED`, or `REJECTED_FRAUD_ALERT`.
+- Idempotent replays, conflicting-invoice detection and SHA-256 material-content checks.
+- Mock ledger, audit log and notification queues; no external ERP or Slack account required.
 
-## 2. Directory Layout
+## Architecture
+
 ```text
-smart-invoice-audit-pipeline/
-├── docs/                      # Enterprise documentation suite
-│   ├── ARCHITECTURE.md        # System topology and sequence flow
-│   ├── THREAT_MODEL.md        # STRIDE security analysis
-│   ├── SECURITY_HARDENING_REPORT.md # Audit and static scan findings
-│   ├── TEST_EVIDENCE.md       # Verifiable test execution records
-│   ├── DEMO-GUIDE.md          # Local reproduction instructions
-│   └── RELEASE_READINESS_MATRIX.md # Quality gate scorecard
-├── lib/                       # Core validation and evaluation logic
-│   ├── invoice-validator.js   # Schema and math validation
-│   ├── anomaly-detector.js    # Fraud and threshold scoring
-│   ├── po-matcher.js          # Two-way PO reconciliation
-│   └── invoice-pipeline.js    # Master pipeline orchestrator
-├── mock-erp/                  # Local mock ERP service
-│   ├── database.js            # In-memory vendor & PO store
-│   └── server.js              # HTTP server (127.0.0.1:3002)
-├── sample-data/               # Test fixtures (clean, fraud, overrun)
-├── tests/                     # 7-tier test harness
-├── workflow/                  # n8n workflow definitions
-├── run-all-tests.js           # Automated QA runner
-└── validate-workflow.js       # Workflow graph integrity checker
+Invoice JSON -> n8n webhook/auth -> validation -> Mock ERP vendor + PO lookup
+             -> risk scoring & triage -> Mock ERP ledger / mock alert queue
+             -> webhook response
 ```
 
----
+The included n8n workflow has **17 nodes**. Host ports are bound to `127.0.0.1`; services communicate over a Docker bridge network.
 
-## 3. Quick Start & Testing
-Execute the complete test harness locally:
+## Reproduce the local tests
+
+**Requirements:** Node.js, Docker Desktop with the Docker engine running, and the Docker Compose CLI.
 
 ```bash
 node run-all-tests.js
 ```
+
+This runs static/schema checks, unit tests, API integration tests, negative/security cases, and a **real Docker + n8n webhook HTTP end-to-end suite**. To run only the live suite:
+
+```bash
+node tests/e2e/real-n8n-live.js
+```
+
+**Latest locally reported run (November 22, 2026): 8/8 suites passing, including 11 live HTTP scenarios.** These results were reported by the local automation runner; there is no independent GitHub Actions CI run for this commit. See [test evidence](docs/TEST_EVIDENCE.md) for the recorded output and [demo guide](docs/DEMO-GUIDE.md) for reproduction notes.
+
+## Documentation
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Threat model](docs/THREAT_MODEL.md)
+- [Security test scope](docs/SECURITY_HARDENING_REPORT.md)
+- [Test evidence](docs/TEST_EVIDENCE.md)
+- [Release-readiness matrix](docs/RELEASE_READINESS_MATRIX.md)
+
+## Security and important limitations
+
+- Only **synthetic** invoices and vendors are included; no live accounting/payment integrations.
+- The Mock ERP data, deduplication state, audit log and notifications are **in-memory and lost on restart**.
+- Fixed-point/decimal money arithmetic, robust authorization roles, durable audit storage and independent review would be required for a real financial deployment.
+- The tests and regex-based secret scan are **not** a guarantee of zero vulnerabilities.
+- This repo is not intended to be exposed as a public network service; never reuse test values as real credentials.
+- The code is publicly viewable if the owner makes the repository public; **no open-source license has been granted** unless a separate license is explicitly added.

@@ -1,0 +1,187 @@
+/**
+ * Integration Tests: Mock ERP REST API & Idempotent Ledger Storage
+ */
+
+const assert = require('node:assert');
+const http = require('node:http');
+
+const TEST_KEY = 'erp_test_secure_key_1122334455';
+process.env.ERP_API_KEY = TEST_KEY;
+
+const { start } = require('../../mock-erp/server');
+const { db } = require('../../mock-erp/database');
+
+const TEST_PORT = 3088;
+const TEST_HOST = '127.0.0.1';
+
+function request(method, path, headers = {}, body = null) {
+  return new Promise((resolve, reject) => {
+    const payload = body ? JSON.stringify(body) : null;
+    const req = http.request(
+      {
+        hostname: TEST_HOST,
+        port: TEST_PORT,
+        path,
+        method,
+        headers: {
+          'x-erp-api-key': TEST_KEY,
+          'Content-Type': 'application/json',
+          ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
+          ...headers
+        }
+      },
+      res => {
+        let responseBody = '';
+        res.on('data', chunk => { responseBody += chunk; });
+        res.on('end', () => {
+          let data = {};
+          try { data = JSON.parse(responseBody); } catch (_) { data = { raw: responseBody }; }
+          resolve({ status: res.statusCode, headers: res.headers, data });
+        });
+      }
+    );
+    req.on('error', reject);
+    if (payload) req.write(payload);
+    req.end();
+  });
+}
+
+(async () => {
+  console.log('--- Running Integration Tests: Mock ERP REST API & Idempotency ---');
+  let server;
+
+  try {
+    server = await start(TEST_PORT, TEST_HOST);
+    db.reset();
+
+    // Test 1: Healthcheck
+    {
+      const res = await request('GET', '/health');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.data.status, 'UP');
+      console.log('✓ Test 1 Passed: Mock ERP health endpoint responds 200 OK on loopback');
+    }
+
+    // Test 2: Fetch Known Vendor Master
+    {
+      const res = await request('GET', '/api/vendors/VEND-001');
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.data.vendor_id, 'VEND-001');
+      assert.strictEqual(res.data.bank_account_number, 'US-BANK-99887711');
+      console.log('✓ Test 2 Passed: Known vendor master record retrieved');
+    }
+
+    // Test 3: Fetch Non-Existent Vendor returns 404
+    {
+      const res = await request('GET', '/api/vendors/VEND-GHOST-999');
+      assert.strictEqual(res.status, 404);
+      console.log('✓ Test 3 Passed: Non-existent vendor correctly returns HTTP 404');
+    }
+
+    // Test 4: Ingest and Record New Invoice
+    const testInvoiceRecord = {
+      fingerprint: 'test_hash_unique_112233',
+      invoice_number: 'INV-TEST-999',
+      vendor_id: 'VEND-001',
+      total_amount: 1500.00,
+      decision: 'AUTO_APPROVED',
+      risk_score: 0
+    };
+
+    {
+      const res = await request('POST', '/api/invoices', {}, testInvoiceRecord);
+      assert.strictEqual(res.status, 201);
+      assert.strictEqual(res.data.status, 'INVOICE_RECORDED');
+      console.log('✓ Test 4 Passed: Valid invoice successfully recorded in ERP ledger (HTTP 201)');
+    }
+
+    // Test 5: Idempotency - Re-submitting same invoice returns cached 200 OK
+    {
+      const res = await request('POST', '/api/invoices', {}, testInvoiceRecord);
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.data.status, 'IDEMPOTENT_DUPLICATE_ACCEPTED');
+      assert.strictEqual(res.data.record.invoice_number, 'INV-TEST-999');
+      console.log('✓ Test 5 Passed: Duplicate invoice fingerprint handled idempotently (HTTP 200)');
+    }
+
+    // Test 6: Mock Notification Ingestion & Query
+    {
+      const notifPayload = {
+        channel: '#sec-fraud-alerts',
+        type: 'CRITICAL_FRAUD',
+        message: 'Test fraud notification'
+      };
+      const postRes = await request('POST', '/api/notifications', {}, notifPayload);
+      assert.strictEqual(postRes.status, 201);
+      assert.strictEqual(postRes.data.status, 'NOTIFICATION_DELIVERED');
+
+      const getRes = await request('GET', '/api/notifications');
+      assert.strictEqual(getRes.status, 200);
+      assert(getRes.data.count >= 1);
+      console.log('✓ Test 6 Passed: Mock notification delivered and retrieved via GET /api/notifications');
+    }
+
+    // Test 7: Conflicting Invoice Submission Detection (Same Identity, Divergent Data)
+    {
+      const conflictingInvoice = {
+        ...testInvoiceRecord,
+        total_amount: 9999.00 // Conflicting amount!
+      };
+      const conflictRes = await request('POST', '/api/invoices', {}, conflictingInvoice);
+      assert.strictEqual(conflictRes.status, 409, 'Expected HTTP 409 Conflict on altered invoice resubmission');
+      assert.strictEqual(conflictRes.data.status, 'CONFLICTING_IDENTITY_REJECTED');
+      assert.strictEqual(conflictRes.data.decision, 'REJECTED_FRAUD_ALERT');
+      // Verify original record was not corrupted
+      assert.strictEqual(conflictRes.data.record.total_amount, 1500.00);
+      console.log('✓ Test 7 Passed: Conflicting invoice submission safely detected and rejected (HTTP 409)');
+    }
+
+    // Test 8: Strengthened Content Hashing - Divergent Bank Details on Same Total Rejected
+    {
+      const bankConflictInvoice = {
+        ...testInvoiceRecord,
+        total_amount: 1500.00, // Same total!
+        bank_details: { account_number: 'ATTACKER-ACCOUNT-666' } // Material bank change!
+      };
+      const bankConflictRes = await request('POST', '/api/invoices', {}, bankConflictInvoice);
+      assert.strictEqual(bankConflictRes.status, 409, 'Expected HTTP 409 on diverted bank account resubmission');
+      assert.strictEqual(bankConflictRes.data.status, 'CONFLICTING_IDENTITY_REJECTED');
+      console.log('✓ Test 8 Passed: Material bank alteration with identical total detected as conflict (HTTP 409)');
+    }
+
+    // Test 9: Notification Deduplication (Zero Alert Storm on Replay)
+    {
+      const beforeCount = (await request('GET', '/api/notifications')).data.count;
+      const replayNotif = {
+        channel: '#sec-fraud-alerts',
+        type: 'CRITICAL_FRAUD',
+        message: 'Test fraud notification'
+      };
+      const postReplay = await request('POST', '/api/notifications', {}, replayNotif);
+      assert.strictEqual(postReplay.status, 200);
+      assert.strictEqual(postReplay.data.status, 'NOTIFICATION_ALREADY_DELIVERED');
+      const afterCount = (await request('GET', '/api/notifications')).data.count;
+      assert.strictEqual(afterCount, beforeCount, 'Notification count must not increase on replay');
+      console.log('✓ Test 9 Passed: Notification deduplication verified (zero duplicate alerts on replay)');
+    }
+
+    // Test 10: Storage Info & Persistence Classification
+    {
+      const storageRes = await request('GET', '/api/system/storage-info');
+      assert.strictEqual(storageRes.status, 200);
+      assert.strictEqual(storageRes.data.storage_type, 'IN_MEMORY_TRANSIENT');
+      assert.strictEqual(storageRes.data.persistent_across_restarts, false);
+      assert.strictEqual(storageRes.data.audit_trail_scope, 'EPHEMERAL_PER_CONTAINER_SESSION');
+      console.log('✓ Test 10 Passed: Storage classified accurately as IN_MEMORY_TRANSIENT (non-persistent)');
+    }
+
+    console.log('All Integration Tests (Mock ERP API) Passed Successfully.\n');
+  } catch (err) {
+    console.error('Integration Test Failure:', err);
+    process.exit(1);
+  } finally {
+    if (server) {
+      server.close();
+    }
+  }
+})();

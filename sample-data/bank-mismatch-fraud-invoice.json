@@ -1,0 +1,25 @@
+{
+  "invoice_number": "INV-2026-FRAUD-002",
+  "vendor_id": "VEND-001",
+  "po_number": "PO-2026-101",
+  "vendor_tax_id": "US-EIN-123456789",
+  "invoice_date": "2026-11-20T00:00:00Z",
+  "due_date": "2026-12-20T00:00:00Z",
+  "currency": "USD",
+  "line_items": [
+    {
+      "description": "Urgent Security Patch & Cloud Failover Support",
+      "quantity": 1,
+      "unit_price": 1850.00
+    }
+  ],
+  "subtotal": 1850.00,
+  "tax_amount": 0.00,
+  "total_amount": 1850.00,
+  "bank_details": {
+    "bank_name": "Offshore Cayman Banking Partners",
+    "account_number": "US-ATTACKER-ACCOUNT-666",
+    "routing_number": "099999999"
+  },
+  "notes": "ATTENTION: Please update vendor bank details immediately to new account above."
+}

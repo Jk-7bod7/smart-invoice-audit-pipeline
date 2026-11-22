@@ -1,0 +1,358 @@
+{
+  "id": "invoice-audit-pipeline",
+  "name": "Intelligent Accounts Payable (AP) Invoice Audit & Fraud Prevention Pipeline",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "invoice-audit-intake",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "node-1-webhook-ingress",
+      "name": "Webhook: Inbound Invoice Intake",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1.1,
+      "position": [180, 300],
+      "webhookId": "invoice-audit-intake"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "boolean": [
+            {
+              "value1": "={{ Boolean($env.INVOICE_WEBHOOK_SECRET && $env.INVOICE_WEBHOOK_SECRET.trim().length > 0 && $json.headers && $json.headers['x-webhook-token'] && $json.headers['x-webhook-token'].trim().length > 0 && $json.headers['x-webhook-token'].trim() === $env.INVOICE_WEBHOOK_SECRET.trim()) }}",
+              "value2": true
+            }
+          ]
+        }
+      },
+      "id": "node-2-auth-check",
+      "name": "Verify Ingress Token",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 1,
+      "position": [400, 300]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ error: 'Unauthorized', message: 'Missing or invalid x-webhook-token header.' }) }}",
+        "options": {
+          "responseCode": 401
+        }
+      },
+      "id": "node-auth-fail",
+      "name": "Respond: 401 Unauthorized",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [620, 480]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Line-item math validation and financial precision\nconst invoice = $input.item.json.body || $input.item.json;\nlet calculatedSubtotal = 0;\nif (Array.isArray(invoice.line_items)) {\n  for (const item of invoice.line_items) {\n    calculatedSubtotal += (Number(item.quantity) || 0) * (Number(item.unit_price) || 0);\n  }\n}\ncalculatedSubtotal = Math.round(calculatedSubtotal * 100) / 100;\nconst declaredSubtotal = Math.round((Number(invoice.subtotal) || 0) * 100) / 100;\nconst declaredTax = Math.round((Number(invoice.tax_amount) || 0) * 100) / 100;\nconst declaredTotal = Math.round((Number(invoice.total_amount) || 0) * 100) / 100;\n\nconst subtotalMatch = Math.abs(calculatedSubtotal - declaredSubtotal) < 0.01;\nconst totalMatch = Math.abs((declaredSubtotal + declaredTax) - declaredTotal) < 0.01;\nconst mathValid = subtotalMatch && totalMatch;\n\nreturn { json: { ...invoice, subtotal: declaredSubtotal, tax_amount: declaredTax, total_amount: declaredTotal, calculated_subtotal: calculatedSubtotal, math_valid: mathValid } };"
+      },
+      "id": "node-3-math-validator",
+      "name": "Code: Validate Math & Tax",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [640, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/vendors/' + $json.vendor_id }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-4-vendor-lookup",
+      "name": "HTTP: Fetch Vendor Master",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [880, 200]
+    },
+    {
+      "parameters": {
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/purchase-orders/' + ($('Code: Validate Math & Tax').item.json.po_number || 'NONE') }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" }
+          ]
+        },
+        "options": {}
+      },
+      "id": "node-5-po-lookup",
+      "name": "HTTP: Fetch Purchase Order",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [1100, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Two-way PO Matcher & Tolerance Check\nconst invoice = $('Code: Validate Math & Tax').item.json;\nconst po = $input.item.json;\nconst poBudget = Number(po.total_amount || 0);\nconst invoiceTotal = Number(invoice.total_amount || 0);\nconst variance = Math.round((invoiceTotal - poBudget) * 100) / 100;\nconst allowableTolerance = Math.min(poBudget * 0.01, 25.0);\n\nlet matched = false;\nlet status = 'NO_PO_FOUND';\nif (po && (po.status === 'APPROVED' || po.status === 'OPEN')) {\n  if (invoice.vendor_id !== po.vendor_id) {\n    status = 'VENDOR_MISMATCH';\n  } else if (invoiceTotal <= poBudget) {\n    matched = true;\n    status = 'MATCHED_UNDER_BUDGET';\n  } else if (variance <= allowableTolerance) {\n    matched = true;\n    status = 'MATCHED_WITHIN_TOLERANCE';\n  } else {\n    status = 'BUDGET_OVERRUN';\n  }\n}\nreturn { json: { ...invoice, po_matched: matched, po_status: status, po_budget: poBudget, variance } };"
+      },
+      "id": "node-6-po-matcher",
+      "name": "Code: Two-Way PO Matcher",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1320, 200]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Anomaly & Fraud Scoring Engine\nconst crypto = require('crypto');\nconst invoice = $input.item.json;\nconst vendor = $('HTTP: Fetch Vendor Master').item.json;\nlet riskScore = 0;\nconst flags = [];\n\nconst fingerprint = crypto.createHash('sha256').update(`${invoice.vendor_id}::${invoice.invoice_number}`).digest('hex');\n\n// Bank divergence check & missing/unverified bank protection\nconst masterBank = String(vendor.bank_account_number || '').trim();\nconst invoiceBank = String(invoice.bank_details?.account_number || '').trim();\nif (!masterBank || !invoiceBank) {\n  riskScore += 40;\n  flags.push('UNVERIFIED_BANK_DETAILS');\n} else if (masterBank !== invoiceBank) {\n  riskScore += 80;\n  flags.push('VENDOR_BANK_ACCOUNT_MISMATCH');\n}\n\n// Line-item arithmetic validation check\nif (invoice.math_valid === false) {\n  riskScore += 50;\n  flags.push('ARITHMETIC_RECONCILIATION_FAILED');\n}\n\n// PO status check\nif (!invoice.po_matched) {\n  riskScore += 40;\n  flags.push(`PO_${invoice.po_status}`);\n}\n\n// Threshold governance\nif (invoice.total_amount >= 50000) {\n  riskScore += 25;\n  flags.push('CFO_APPROVAL_REQUIRED');\n} else if (invoice.total_amount >= 10000) {\n  riskScore += 15;\n  flags.push('DIRECTOR_APPROVAL_REQUIRED');\n} else if (invoice.total_amount >= 2500) {\n  riskScore += 10;\n  flags.push('MANAGER_APPROVAL_REQUIRED');\n}\n\nlet decision = 'AUTO_APPROVED';\nif (riskScore >= 70) {\n  decision = 'REJECTED_FRAUD_ALERT';\n} else if (riskScore >= 20 || invoice.total_amount >= 2500 || !invoice.po_matched || invoice.math_valid === false || !masterBank || !invoiceBank) {\n  decision = 'MANUAL_AUDIT_REQUIRED';\n}\n\n// Strict Invariant: Math errors or unverified bank details CANNOT qualify for AUTO_APPROVED\nif ((invoice.math_valid === false || !masterBank || !invoiceBank) && decision === 'AUTO_APPROVED') {\n  decision = 'MANUAL_AUDIT_REQUIRED';\n}\n\nreturn { json: { ...invoice, fingerprint, risk_score: riskScore, decision, flags } };"
+      },
+      "id": "node-7-anomaly-engine",
+      "name": "Code: Anomaly & Fraud Engine",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [1540, 200]
+    },
+    {
+      "parameters": {
+        "dataType": "string",
+        "value1": "={{ $json.decision }}",
+        "rules": {
+          "rules": [
+            { "value2": "AUTO_APPROVED", "output": 0 },
+            { "value2": "MANUAL_AUDIT_REQUIRED", "output": 1 },
+            { "value2": "REJECTED_FRAUD_ALERT", "output": 2 }
+          ]
+        }
+      },
+      "id": "node-8-decision-switch",
+      "name": "Switch: Triage Decision",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 1,
+      "position": [1760, 200]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/invoices' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, po_number: ($json.po_number || null), currency: ($json.currency || 'USD'), subtotal: $json.subtotal, tax_amount: $json.tax_amount, total_amount: $json.total_amount, due_date: ($json.due_date || null), invoice_date: ($json.invoice_date || null), bank_details: ($json.bank_details || null), line_items: ($json.line_items || null), decision: 'AUTO_APPROVED', risk_score: $json.risk_score, flags: $json.flags }) }}"
+      },
+      "id": "node-9-ledger-auto-approved",
+      "name": "HTTP: Post Ledger (Auto-Approved)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2000, 100]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/invoices' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, po_number: ($json.po_number || null), currency: ($json.currency || 'USD'), subtotal: $json.subtotal, tax_amount: $json.tax_amount, total_amount: $json.total_amount, due_date: ($json.due_date || null), invoice_date: ($json.invoice_date || null), bank_details: ($json.bank_details || null), line_items: ($json.line_items || null), decision: 'MANUAL_AUDIT_REQUIRED', risk_score: $json.risk_score, flags: $json.flags }) }}"
+      },
+      "id": "node-10-ledger-manual-audit",
+      "name": "HTTP: Post Ledger (Manual Audit)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2000, 250]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/invoices' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, po_number: ($json.po_number || null), currency: ($json.currency || 'USD'), subtotal: $json.subtotal, tax_amount: $json.tax_amount, total_amount: $json.total_amount, due_date: ($json.due_date || null), invoice_date: ($json.invoice_date || null), bank_details: ($json.bank_details || null), line_items: ($json.line_items || null), decision: 'REJECTED_FRAUD_ALERT', risk_score: $json.risk_score, flags: $json.flags }) }}"
+      },
+      "id": "node-11-ledger-fraud-alert",
+      "name": "HTTP: Post Ledger (Fraud Alert)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2000, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/notifications' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: '#sec-fraud-alerts', type: 'CRITICAL_FRAUD', invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), message: 'CRITICAL AP FRAUD ALERT: Invoice #' + ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN') + ' from Vendor ' + ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') + ' flagged with risk score ' + ($('Code: Anomaly & Fraud Engine').item.json.risk_score || 0) + '. Flags: ' + (($('Code: Anomaly & Fraud Engine').item.json.flags || []).join(', ')), metadata: { invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), vendor_id: ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') } }) }}"
+      },
+      "id": "node-12-mock-fraud-alert",
+      "name": "HTTP: Dispatch Fraud Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2240, 400]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/notifications' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: '#ap-audit-queue', type: 'MANUAL_AUDIT', invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), message: 'AP Manual Review Required: Invoice #' + ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN') + ' ($' + ($('Code: Validate Math & Tax').item.json.total_amount || 0) + ') needs review. Reason: ' + (($('Code: Anomaly & Fraud Engine').item.json.flags || []).join(', ')), metadata: { invoice_number: ($('Code: Validate Math & Tax').item.json.invoice_number || 'UNKNOWN'), vendor_id: ($('Code: Validate Math & Tax').item.json.vendor_id || 'UNKNOWN') } }) }}"
+      },
+      "id": "node-13-mock-audit-queue",
+      "name": "HTTP: Dispatch Audit Queue Notice",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [2240, 250]
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={{ JSON.stringify({ status: 'PROCESSED', decision: ($json.record ? $json.record.decision : ($('Code: Anomaly & Fraud Engine').item.json.decision || $json.decision)), risk_score: ($json.record ? $json.record.risk_score : ($('Code: Anomaly & Fraud Engine').item.json.risk_score !== undefined ? $('Code: Anomaly & Fraud Engine').item.json.risk_score : $json.risk_score)), invoice_number: ($json.record ? $json.record.invoice_number : ($('Code: Validate Math & Tax').item.json.invoice_number || $json.invoice_number)), flags: ($json.record && $json.record.flags ? $json.record.flags : ($('Code: Anomaly & Fraud Engine').item.json.flags || [])) }) }}"
+      },
+      "id": "node-14-respond-webhook",
+      "name": "Respond to Webhook",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [2480, 250]
+    },
+    {
+      "parameters": {},
+      "id": "node-15-error-trigger",
+      "name": "Error Trigger: DLQ",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [180, 550]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ ($env.ERP_BASE_URL || 'http://mock-erp:3002') + '/api/notifications' }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            { "name": "x-erp-api-key", "value": "={{ $env.ERP_API_KEY }}" },
+            { "name": "Content-Type", "value": "application/json" }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify({ channel: '#ap-pipeline-errors', type: 'DLQ_ERROR', message: 'PIPELINE DLQ ERROR: Execution ' + ($execution && $execution.id ? $execution.id : 'unknown') + ' failed.' }) }}"
+      },
+      "id": "node-16-dlq-notification",
+      "name": "HTTP: Dispatch DLQ Alert",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.1,
+      "position": [420, 550]
+    }
+  ],
+  "connections": {
+    "Webhook: Inbound Invoice Intake": {
+      "main": [
+        [{ "node": "Verify Ingress Token", "type": "main", "index": 0 }]
+      ]
+    },
+    "Verify Ingress Token": {
+      "main": [
+        [{ "node": "Code: Validate Math & Tax", "type": "main", "index": 0 }],
+        [{ "node": "Respond: 401 Unauthorized", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code: Validate Math & Tax": {
+      "main": [
+        [{ "node": "HTTP: Fetch Vendor Master", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Fetch Vendor Master": {
+      "main": [
+        [{ "node": "HTTP: Fetch Purchase Order", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Fetch Purchase Order": {
+      "main": [
+        [{ "node": "Code: Two-Way PO Matcher", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code: Two-Way PO Matcher": {
+      "main": [
+        [{ "node": "Code: Anomaly & Fraud Engine", "type": "main", "index": 0 }]
+      ]
+    },
+    "Code: Anomaly & Fraud Engine": {
+      "main": [
+        [{ "node": "Switch: Triage Decision", "type": "main", "index": 0 }]
+      ]
+    },
+    "Switch: Triage Decision": {
+      "main": [
+        [{ "node": "HTTP: Post Ledger (Auto-Approved)", "type": "main", "index": 0 }],
+        [{ "node": "HTTP: Post Ledger (Manual Audit)", "type": "main", "index": 0 }],
+        [{ "node": "HTTP: Post Ledger (Fraud Alert)", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Post Ledger (Auto-Approved)": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Post Ledger (Manual Audit)": {
+      "main": [
+        [{ "node": "HTTP: Dispatch Audit Queue Notice", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Dispatch Audit Queue Notice": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Post Ledger (Fraud Alert)": {
+      "main": [
+        [{ "node": "HTTP: Dispatch Fraud Alert", "type": "main", "index": 0 }]
+      ]
+    },
+    "HTTP: Dispatch Fraud Alert": {
+      "main": [
+        [{ "node": "Respond to Webhook", "type": "main", "index": 0 }]
+      ]
+    },
+    "Error Trigger: DLQ": {
+      "main": [
+        [{ "node": "HTTP: Dispatch DLQ Alert", "type": "main", "index": 0 }]
+      ]
+    }
+  },
+  "active": true,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "f7c9e120-7b33-4f90-a128-b9821d30cf81"
+}

@@ -1,0 +1,25 @@
+{
+  "invoice_number": "INV-2026-OVERRUN-003",
+  "vendor_id": "VEND-001",
+  "po_number": "PO-2026-101",
+  "vendor_tax_id": "US-EIN-123456789",
+  "invoice_date": "2026-11-21T00:00:00Z",
+  "due_date": "2026-12-21T00:00:00Z",
+  "currency": "USD",
+  "line_items": [
+    {
+      "description": "Unplanned Additional Storage Capacity (10 TB)",
+      "quantity": 10,
+      "unit_price": 250.00
+    }
+  ],
+  "subtotal": 2500.00,
+  "tax_amount": 200.00,
+  "total_amount": 2700.00,
+  "bank_details": {
+    "bank_name": "Chase Commercial Banking",
+    "account_number": "US-BANK-99887711",
+    "routing_number": "021000021"
+  },
+  "notes": "Emergency overage fees applied."
+}
