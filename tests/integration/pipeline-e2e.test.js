@@ -10,6 +10,9 @@ const { start } = require('../../mock-erp/server');
 const { db } = require('../../mock-erp/database');
 const { InvoiceAuditPipeline } = require('../../lib/invoice-pipeline');
 
+const TEST_KEY = 'erp_test_secure_key_1122334455';
+process.env.ERP_API_KEY = TEST_KEY;
+
 const TEST_PORT = 3089;
 const TEST_HOST = '127.0.0.1';
 
@@ -23,7 +26,8 @@ const TEST_HOST = '127.0.0.1';
 
     const pipeline = new InvoiceAuditPipeline({
       erpHost: TEST_HOST,
-      erpPort: TEST_PORT
+      erpPort: TEST_PORT,
+      erpApiKey: TEST_KEY
     });
 
     const cleanInvoice = JSON.parse(
@@ -79,6 +83,15 @@ const TEST_HOST = '127.0.0.1';
       assert(auditLogs.some(log => log.decision === 'AUTO_APPROVED'));
       assert(auditLogs.some(log => log.decision === 'REJECTED_FRAUD_ALERT'));
       console.log(`✓ Scenario 5 Passed: Auditable transaction trail verified (${auditLogs.length} events logged)`);
+    }
+
+    // Scenario 6: Mock Notification Delivery Verification
+    {
+      const notifications = db.getNotifications();
+      assert(notifications.length >= 2, `Expected at least 2 notifications, found ${notifications.length}`);
+      assert(notifications.some(n => n.channel === '#sec-fraud-alerts' && n.type === 'CRITICAL_FRAUD'));
+      assert(notifications.some(n => n.channel === '#ap-audit-queue' && n.type === 'MANUAL_AUDIT'));
+      console.log(`✓ Scenario 6 Passed: Mock notifications delivered to fraud & audit queues (${notifications.length} notifications)`);
     }
 
     console.log('All Pipeline E2E Integration Tests Passed Successfully.\n');

@@ -28,8 +28,8 @@ flowchart TD
     F --> G{"Triage Decision Engine"}
     
     G -->|Clean Match & Low Value| H["AUTO_APPROVED<br/>Record in ERP Ledger"]
-    G -->|Tolerance Variance / High Value| I["MANUAL_AUDIT_REQUIRED<br/>Route to AP Review Queue + Slack"]
-    G -->|Bank Mismatch / Duplicate Hash| J["REJECTED_FRAUD_ALERT<br/>Block Payment + Critical Security Alert"]
+    G -->|Tolerance Variance / High Value| I["MANUAL_AUDIT_REQUIRED<br/>Route to AP Queue + Mock Alert (/api/notifications)"]
+    G -->|Bank Mismatch / Duplicate Hash| J["REJECTED_FRAUD_ALERT<br/>Block Payment + Sec Fraud Alert (/api/notifications)"]
     
     H --> K["Idempotent ERP Ledger Response<br/>HTTP 200 / 201"]
     I --> K
@@ -42,7 +42,7 @@ flowchart TD
 
 ### Stage 1: Ingress Authentication & Rate Limiting
 - **Mechanism:** HTTP header validation (`x-webhook-token` or `x-erp-api-key`).
-- **Enforcement:** Fail-closed. Missing or mismatched tokens terminate processing immediately with `HTTP 401 Unauthorized`.
+- **Enforcement:** Fail-closed. Missing or mismatched tokens terminate processing immediately with `HTTP 401 Unauthorized` (directly connected to webhook response node with zero downstream side-effects).
 - **DoS Defense:** Bounded streaming parser enforces a hard $256\text{ KB}$ request ceiling, destroying sockets that exceed bounds (`HTTP 413`).
 
 ### Stage 2: Schema & Mathematical Verification (`lib/invoice-validator.js`)
@@ -52,7 +52,7 @@ flowchart TD
 - Rejects inverted dates (`due_date < invoice_date`) and non-numeric/negative quantities.
 
 ### Stage 3 & 4: Two-Way PO Matching (`lib/po-matcher.js`)
-- Queries ERP for active Purchase Order.
+- Queries ERP for active Purchase Order via Docker service discovery (`http://mock-erp:3002`).
 - Validates PO status (`APPROVED` or `OPEN`).
 - Verifies vendor ID and currency agreement.
 - Calculates variance:
@@ -69,9 +69,10 @@ flowchart TD
   - Tier 3 ($\$10,000\text{--}\$50,000$): Director review threshold.
   - Tier 4 ($\ge \$50,000$): Executive / CFO review threshold.
 
-### Stage 6: Mock ERP Ledger Ingestion (`mock-erp/`)
-- Express-compatible zero-dependency HTTP server (`node:http`) listening exclusively on `127.0.0.1:3002`.
+### Stage 6: Mock ERP Ledger Ingestion & Notification Store (`mock-erp/`)
+- Express-compatible zero-dependency HTTP server (`node:http`) listening on `0.0.0.0:3002` inside the Docker network (mapped strictly to `127.0.0.1:3002` on host).
 - Stores vendor master records, active POs, and an immutable audit log.
+- Incorporates local in-memory Mock Notification Store (`POST /api/notifications` and `GET /api/notifications`) providing local inspection of fraud alerts (`#sec-fraud-alerts`) and AP review alerts (`#ap-audit-queue`) without external webhook dependencies.
 - Enforces event idempotency: Duplicate requests return cached `HTTP 200` without creating duplicate payments or duplicate alerts.
 
 ---
@@ -79,5 +80,5 @@ flowchart TD
 ## 4. Technology Stack & Zero-Dependency Footprint
 - **Runtime:** Node.js 24 LTS (Pure built-in standard library: `node:http`, `node:crypto`, `node:fs`, `node:assert`, `node:path`, `node:child_process`).
 - **External Dependencies:** **Zero external npm packages**. Eliminates supply-chain attack vectors.
-- **Network Interface:** `127.0.0.1` (Strict loopback isolation).
-- **Workflow Automation:** n8n 16-node orchestration graph (`workflow/invoice-audit-workflow.json`).
+- **Network Interface:** Loopback isolation (`127.0.0.1`) on host; container bridge service discovery (`mock-erp:3002`) in Docker Compose.
+- **Workflow Automation:** n8n 17-node orchestration graph (`workflow/invoice-audit-workflow.json`).

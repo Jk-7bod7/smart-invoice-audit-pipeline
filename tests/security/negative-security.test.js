@@ -5,7 +5,11 @@
 
 const assert = require('node:assert');
 const http = require('node:http');
-const { start, EXPECTED_API_KEY } = require('../../mock-erp/server');
+
+const TEST_KEY = 'erp_test_secure_key_1122334455';
+process.env.ERP_API_KEY = TEST_KEY;
+
+const { start } = require('../../mock-erp/server');
 const { validateInvoice, ValidationError } = require('../../lib/invoice-validator');
 
 const TEST_PORT = 3090;
@@ -78,7 +82,7 @@ function rawRequest(options, body = null) {
           method: 'POST',
           path: '/api/invoices',
           headers: {
-            'x-erp-api-key': EXPECTED_API_KEY,
+            'x-erp-api-key': TEST_KEY,
             'Content-Type': 'application/json',
             'Content-Length': Buffer.byteLength(oversizedPayload)
           }
@@ -96,7 +100,7 @@ function rawRequest(options, body = null) {
         method: 'POST',
         path: '/api/invoices',
         headers: {
-          'x-erp-api-key': EXPECTED_API_KEY,
+          'x-erp-api-key': TEST_KEY,
           'Content-Type': 'text/plain'
         }
       }, 'This is plain text');
@@ -112,7 +116,7 @@ function rawRequest(options, body = null) {
         method: 'POST',
         path: '/api/invoices',
         headers: {
-          'x-erp-api-key': EXPECTED_API_KEY,
+          'x-erp-api-key': TEST_KEY,
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(malformedJson)
         }
@@ -129,7 +133,7 @@ function rawRequest(options, body = null) {
         method: 'POST',
         path: '/api/invoices',
         headers: {
-          'x-erp-api-key': EXPECTED_API_KEY,
+          'x-erp-api-key': TEST_KEY,
           'Content-Type': 'application/json',
           'Content-Length': Buffer.byteLength(payloadWithoutFingerprint)
         }

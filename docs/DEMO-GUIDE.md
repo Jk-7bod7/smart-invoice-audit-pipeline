@@ -19,9 +19,15 @@ node run-all-tests.js
 ```
 
 Expected output:
-- All 7 verification suites execute sequentially.
-- Pass verdict on schema validation, unit math, anomaly detection, mock integration, pipeline E2E, adversarial security, and zero-secrets audit.
-- Total execution duration: $< 1.0\text{s}$.
+- All 8 verification suites execute sequentially.
+- Pass verdict on schema validation, unit math, anomaly detection, mock integration, pipeline E2E, adversarial security, zero-secrets audit, and real live container E2E.
+- Fast suites execute in $< 1.0\text{s}$, followed by the isolated Docker + n8n live HTTP verification suite.
+
+To run only the genuine Docker + n8n live E2E test harness independently:
+
+```bash
+node tests/e2e/real-n8n-live.js
+```
 
 ---
 
@@ -93,3 +99,16 @@ Inspect the auditable ledger of all decisions:
 ```powershell
 Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices/audit-log" -Method Get -Headers $headers | ConvertTo-Json -Depth 5
 ```
+
+---
+
+### Step 6: Query Mock Notifications
+Verify fraud alerts and review notifications recorded by the local mock notification store:
+
+```powershell
+Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/notifications" -Method Get -Headers $headers | ConvertTo-Json -Depth 5
+```
+
+*Expected Result:*
+- Channel `#sec-fraud-alerts` receives critical alerts on bank account divergence and duplicate submissions.
+- Channel `#ap-audit-queue` receives triage alerts on purchase order overruns and high-value approvals.

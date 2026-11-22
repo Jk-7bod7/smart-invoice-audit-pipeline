@@ -4,7 +4,11 @@
 
 const assert = require('node:assert');
 const http = require('node:http');
-const { start, EXPECTED_API_KEY } = require('../../mock-erp/server');
+
+const TEST_KEY = 'erp_test_secure_key_1122334455';
+process.env.ERP_API_KEY = TEST_KEY;
+
+const { start } = require('../../mock-erp/server');
 const { db } = require('../../mock-erp/database');
 
 const TEST_PORT = 3088;
@@ -20,7 +24,7 @@ function request(method, path, headers = {}, body = null) {
         path,
         method,
         headers: {
-          'x-erp-api-key': EXPECTED_API_KEY,
+          'x-erp-api-key': TEST_KEY,
           'Content-Type': 'application/json',
           ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}),
           ...headers
@@ -98,6 +102,23 @@ function request(method, path, headers = {}, body = null) {
       assert.strictEqual(res.data.status, 'IDEMPOTENT_DUPLICATE_ACCEPTED');
       assert.strictEqual(res.data.record.invoice_number, 'INV-TEST-999');
       console.log('✓ Test 5 Passed: Duplicate invoice fingerprint handled idempotently (HTTP 200)');
+    }
+
+    // Test 6: Mock Notification Ingestion & Query
+    {
+      const notifPayload = {
+        channel: '#sec-fraud-alerts',
+        type: 'CRITICAL_FRAUD',
+        message: 'Test fraud notification'
+      };
+      const postRes = await request('POST', '/api/notifications', {}, notifPayload);
+      assert.strictEqual(postRes.status, 201);
+      assert.strictEqual(postRes.data.status, 'NOTIFICATION_DELIVERED');
+
+      const getRes = await request('GET', '/api/notifications');
+      assert.strictEqual(getRes.status, 200);
+      assert(getRes.data.count >= 1);
+      console.log('✓ Test 6 Passed: Mock notification delivered and retrieved via GET /api/notifications');
     }
 
     console.log('All Integration Tests (Mock ERP API) Passed Successfully.\n');

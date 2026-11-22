@@ -9,7 +9,7 @@ services:
     environment:
       - HOST=0.0.0.0
       - ERP_PORT=3002
-      - ERP_API_KEY=${ERP_API_KEY:-erp_secret_test_key_8899aabbcc}
+      - ERP_API_KEY=${ERP_API_KEY:?ERP_API_KEY environment variable must be set and non-empty}
       - NODE_ENV=production
     ports:
       - "127.0.0.1:3002:3002"
@@ -42,8 +42,9 @@ services:
       - N8N_RUNNERS_ENABLED=true
       - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
       - NODE_FUNCTION_ALLOW_BUILTIN=crypto
-      - ERP_API_KEY=${ERP_API_KEY:-erp_secret_test_key_8899aabbcc}
-      - INVOICE_WEBHOOK_SECRET=${INVOICE_WEBHOOK_SECRET:-invoice_webhook_test_secret_1122}
+      - ERP_BASE_URL=http://mock-erp:3002
+      - ERP_API_KEY=${ERP_API_KEY:?ERP_API_KEY environment variable must be set and non-empty}
+      - INVOICE_WEBHOOK_SECRET=${INVOICE_WEBHOOK_SECRET:?INVOICE_WEBHOOK_SECRET environment variable must be set and non-empty}
     volumes:
       - n8n-invoice-storage:/home/node/.n8n
       - ./workflow/invoice-audit-workflow.json:/workflows/workflow.json:ro

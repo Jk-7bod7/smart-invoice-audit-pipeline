@@ -9,7 +9,10 @@ const { db } = require('./database');
 const MAX_PAYLOAD_BYTES = 256 * 1024; // 256 KB hard DoS cap
 const DEFAULT_PORT = 3002;
 const DEFAULT_HOST = process.env.HOST || '127.0.0.1';
-const EXPECTED_API_KEY = process.env.ERP_API_KEY || 'erp_secret_test_key_8899aabbcc';
+
+function getRequiredApiKey() {
+  return (process.env.ERP_API_KEY || '').trim();
+}
 
 /**
  * Creates the HTTP server instance.
@@ -39,12 +42,13 @@ function createServer() {
       });
     }
 
-    // 2. Authentication Gate (Fail-Closed)
-    const apiKey = req.headers['x-erp-api-key'];
-    if (!apiKey || apiKey !== EXPECTED_API_KEY) {
+    // 2. Authentication Gate (Fail-Closed, Requires Non-Empty Configured Secret)
+    const expectedApiKey = getRequiredApiKey();
+    const apiKey = (req.headers['x-erp-api-key'] || '').trim();
+    if (!expectedApiKey || !apiKey || apiKey !== expectedApiKey) {
       return sendJson(401, {
         error: 'Unauthorized',
-        message: 'Missing or invalid x-erp-api-key authentication header.'
+        message: 'Missing, empty, or invalid x-erp-api-key authentication header.'
       });
     }
 
@@ -77,6 +81,32 @@ function createServer() {
         count: db.getAuditLogs().length,
         audit_logs: db.getAuditLogs()
       });
+    }
+
+    // GET /api/notifications
+    if (method === 'GET' && url.pathname === '/api/notifications') {
+      return sendJson(200, {
+        count: db.getNotifications().length,
+        notifications: db.getNotifications()
+      });
+    }
+
+    // POST /api/notifications (Mock Notification Ingestion)
+    if (method === 'POST' && url.pathname === '/api/notifications') {
+      let body = '';
+      req.on('data', chunk => { body += chunk; });
+      req.on('end', () => {
+        let notificationData = {};
+        try {
+          notificationData = body ? JSON.parse(body) : {};
+        } catch (_) {}
+        const recorded = db.addNotification(notificationData);
+        return sendJson(201, {
+          status: 'NOTIFICATION_DELIVERED',
+          notification: recorded
+        });
+      });
+      return;
     }
 
     // POST /api/reset (Test Isolation)
@@ -182,4 +212,4 @@ if (require.main === module) {
   start(port, DEFAULT_HOST);
 }
 
-module.exports = { createServer, start, DEFAULT_PORT, DEFAULT_HOST, EXPECTED_API_KEY };
+module.exports = { createServer, start, DEFAULT_PORT, DEFAULT_HOST, getRequiredApiKey };

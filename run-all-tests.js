@@ -1,6 +1,6 @@
 /**
  * Master QA Test Runner & Evidence Generator
- * Executes all 7 verification suites and outputs execution evidence.
+ * Executes all 8 verification suites and outputs execution evidence.
  */
 
 const { spawnSync } = require('node:child_process');
@@ -13,7 +13,8 @@ const SUITES = [
   { name: '4. Integration: Mock ERP REST API & Idempotency', script: 'tests/integration/erp-api.test.js', tier: 'Mock Integration' },
   { name: '5. Integration: Full Invoice Audit Pipeline E2E', script: 'tests/integration/pipeline-e2e.test.js', tier: 'Pipeline E2E' },
   { name: '6. Security: Negative & Adversarial Attack Surface', script: 'tests/security/negative-security.test.js', tier: 'Adversarial Security' },
-  { name: '7. Security: Zero-Secrets & Credentials Audit', script: 'tests/security/security-scan.test.js', tier: 'Static Security Audit' }
+  { name: '7. Security: Zero-Secrets & Credentials Audit', script: 'tests/security/security-scan.test.js', tier: 'Static Security Audit' },
+  { name: '8. Real Container E2E: Live Docker + n8n Webhook HTTP Suite', script: 'tests/e2e/real-n8n-live.js', tier: 'Real Container E2E' }
 ];
 
 console.log('================================================================');
@@ -33,6 +34,7 @@ for (const suite of SUITES) {
   const run = spawnSync('node', [scriptPath], {
     cwd: __dirname,
     encoding: 'utf8',
+    timeout: 120000,
     env: {
       ...process.env,
       NODE_ENV: 'test',

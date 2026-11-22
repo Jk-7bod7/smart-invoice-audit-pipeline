@@ -105,6 +105,7 @@ class MockERPDatabase {
     this.invoices = new Map();
     this.fingerprints = new Set();
     this.auditLogs = [];
+    this.notifications = [];
   }
 
   getVendor(vendorId) {
@@ -158,6 +159,29 @@ class MockERPDatabase {
 
   getAuditLogs() {
     return [...this.auditLogs];
+  }
+
+  addNotification(notification) {
+    const record = {
+      notification_id: `NOTIF-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
+      timestamp: new Date().toISOString(),
+      channel: notification.channel || '#general',
+      type: notification.type || 'INFO',
+      message: notification.message || '',
+      metadata: notification.metadata || {}
+    };
+    this.notifications.push(record);
+    this.addAuditLog({
+      action: 'NOTIFICATION_DISPATCHED',
+      channel: record.channel,
+      type: record.type,
+      message: record.message
+    });
+    return record;
+  }
+
+  getNotifications() {
+    return [...this.notifications];
   }
 }
 
