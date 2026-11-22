@@ -4,7 +4,7 @@
 **Auditor:** Autonomous Systems Architect  
 **Project:** Intelligent AP Invoice Audit & Fraud Prevention Pipeline  
 **Target Repository:** Local Reference Architecture (`smart-invoice-audit-pipeline`)  
-**Security Hardening Verdict:** **PASSED (100% Zero-Trust Compliant)**
+**Security Test Verdict:** **Reported local checks passed; no independent penetration test, security certification, or zero-vulnerability claim.**
 
 ---
 
@@ -21,12 +21,12 @@ A recursive regex scanner audited all source code, workflows, configurations, an
 | **Private Keys (RSA/EC)** | `-----BEGIN (RSA\|EC) PRIVATE KEY-----` | 32 | **0** | **CLEAN** |
 | **Hardcoded Password Assigns** | `password[:=]["'][A-Za-z0-9!@#]{8,}["']` | 32 | **0** | **CLEAN** |
 
-**Verdict:** Zero real or unredacted secrets found in tracked files.
+**Verdict:** No credentials matched the scanner's listed patterns in the locally examined tracked files. Pattern checks cannot exclude all forms of secrets or previously committed data.
 
 ---
 
 ## 2. Adversarial Security Verification Matrix
-The negative security test suite (`tests/security/negative-security.test.js`) executed 8 adversarial attack scenarios:
+The documented table below records example cases from the local negative-security suite; see the actual current test source for the complete set of cases.
 
 | Test Case | Attack / Fault Vector | Expected Defense | Observed Response | Result |
 | :---: | :--- | :--- | :--- | :---: |
@@ -43,10 +43,20 @@ The negative security test suite (`tests/security/negative-security.test.js`) ex
 
 ## 3. Network Isolation Verification
 - Host port binding configured exclusively to `127.0.0.1:3002`.
-- Verification confirms no wildcard (`0.0.0.0`) listener exposure. External LAN/WAN devices cannot establish TCP handshakes with development services.
+- Verification confirms no wildcard (`0.0.0.0`) listener exposure. The Docker Compose host port mappings bind to loopback in the documented local configuration. Do not assume equivalent protection if deployment settings are changed.
 
 ---
 
 ## 4. Cryptographic Deduplication Verification
 - Implemented SHA-256 deterministic fingerprinting: $\text{SHA-256}(\text{vendor\_id} + \text{"::"} + \text{invoice\_number})$.
 - Verified that re-submitting an identical invoice payload returns the cached ledger record without creating duplicate ledger records or secondary alert storms.
+
+
+---
+
+## 5. Scope Limits
+- This assessment is based on a local demonstration, its reported test outputs and lightweight static pattern matching; it is **not** a full security audit or penetration test.
+- The notification endpoint accepts request bodies without the same explicit 256 KB cap implemented for invoice ingestion. Do not expose the Mock ERP to untrusted networks.
+- A shared ERP API key protects read/write/reset endpoints in this demo; production deployments require granular authorization, audit retention, rate limiting and role separation.
+- In-memory state is lost on process/container restart; historical audit records are not durable.
+- No real invoices, payment execution, or external ERP integrations are supported.
