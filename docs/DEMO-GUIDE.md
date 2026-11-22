@@ -1,156 +1,45 @@
-# Demonstration & Evaluation Guide
+# Local Demo & Test Guide
 
-This guide provides step-by-step instructions to run, evaluate, and test the **Intelligent AP Invoice Audit Pipeline** locally.
+This is a **local reference implementation using synthetic financial data**. GitHub hosts the source code; the demo is **not** hosted as a live web service.
 
----
+## Prerequisites
 
-## 1. Prerequisites
-- **Node.js:** v18.x or higher (Tested on Node.js v24.22.1 LTS).
-- **Dependencies:** **Zero external dependencies.** Runs using Node.js built-in standard library.
-- **Port Requirement:** `127.0.0.1:3002` (configurable via `ERP_PORT`).
+- Node.js installed and available in PATH.
+- Docker Desktop running, with Docker Compose available.
+- Host ports `127.0.0.1:3002` and `127.0.0.1:5679` available.
 
----
+## Reproducible verification
 
-## 2. Quick Automated Verification (Run All Tests)
-Execute the master automated QA suite:
+From the project root:
 
 ```bash
 node run-all-tests.js
 ```
 
-Expected output:
-- All 8 verification suites execute sequentially.
-- Pass verdict on schema validation, unit math, anomaly detection, mock integration, pipeline E2E, adversarial security, zero-secrets audit, and real live container E2E.
-- Fast suites execute in $< 1.0\text{s}$, followed by the isolated Docker + n8n live HTTP verification suite.
+The runner executes eight suites, including real HTTP tests sent into a live n8n container. The live suite imports/publishes the workflow into an isolated Compose environment, generates temporary test secrets, asserts responses and Mock ERP side effects, and tears down the test stack on completion.
 
-To run only the genuine Docker + n8n live E2E test harness independently:
+Run only the real live n8n suite:
 
 ```bash
 node tests/e2e/real-n8n-live.js
 ```
 
----
+The 11 live scenarios cover invalid/missing authorization, clean invoice handling, idempotent replay, conflicting invoice payloads, arithmetic mismatch, missing bank details, vendor bank mismatch, PO overrun, notifications, transient storage classification, and the in-session audit trail.
 
-## 3. Interactive Manual Demonstration
+Test evidence and precise local outputs: [TEST_EVIDENCE.md](TEST_EVIDENCE.md).
 
-### Step 1: Start the Mock ERP Accounting Service
-In your terminal, start the loopback ERP service:
+## Data and workflow
 
-```bash
-node mock-erp/server.js
-```
-*Output:* `Mock ERP Accounting Service running on http://127.0.0.1:3002`
+- Workflow definition: [invoice-audit-workflow.json](../workflow/invoice-audit-workflow.json)
+- Synthetic fixtures: [sample-data](../sample-data)
+- Mock ERP service: [server.js](../mock-erp/server.js)
+- System architecture: [ARCHITECTURE.md](ARCHITECTURE.md)
 
----
+**Important:** Submitting a raw invoice JSON directly to `/api/invoices` is **not** equivalent to running the invoice evaluation pipeline. The Mock ERP ledger API expects evaluated invoice records with a fingerprint and decision. Use the live n8n test harness for a full demo, rather than bypassing validation.
 
-### Step 2: Test Scenario 1 — Clean Invoice Auto-Approval
-Submit a clean invoice matching PO-2026-101 and verified vendor banking details:
+## Boundaries
 
-```powershell
-$headers = @{
-  "x-erp-api-key" = "erp_secret_test_key_8899aabbcc"
-  "Content-Type"  = "application/json"
-}
-
-$cleanPayload = Get-Content -Raw "sample-data/valid-clean-invoice.json"
-Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices" -Method Post -Headers $headers -Body $cleanPayload
-```
-
-*Expected Result:*
-- HTTP 201 Created
-- Status: `INVOICE_RECORDED`
-- Decision: `AUTO_APPROVED`
-
----
-
-### Step 3: Test Scenario 2 — BEC / Bank Mismatch Fraud Detection
-Submit an invoice from the same vendor, but with altered bank account routing:
-
-```powershell
-$fraudPayload = Get-Content -Raw "sample-data/bank-mismatch-fraud-invoice.json"
-Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices" -Method Post -Headers $headers -Body $fraudPayload
-```
-
-*Expected Result:*
-- Anomaly Engine catches bank divergence (`VENDOR_BANK_ACCOUNT_MISMATCH`).
-- Risk score evaluates to $\ge 80$.
-- Decision: `REJECTED_FRAUD_ALERT`.
-
----
-
-### Step 4: Test Scenario 3 — Purchase Order Budget Overrun
-Submit an invoice that exceeds the approved PO budget beyond the $1\%$ allowable tolerance:
-
-```powershell
-$overrunPayload = Get-Content -Raw "sample-data/budget-overrun-invoice.json"
-Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices" -Method Post -Headers $headers -Body $overrunPayload
-```
-
-*Expected Result:*
-- POMatcher detects budget overrun (`PO_BUDGET_OVERRUN`).
-- Decision: `MANUAL_AUDIT_REQUIRED`.
-- Routed to Accounts Payable approval queue.
-
----
-
-### Step 5: Query the Audit Log
-Inspect the auditable ledger of all decisions:
-
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices/audit-log" -Method Get -Headers $headers | ConvertTo-Json -Depth 5
-```
-
----
-
-### Step 6: Query Mock Notifications
-Verify fraud alerts and review notifications recorded by the local mock notification store:
-
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/notifications" -Method Get -Headers $headers | ConvertTo-Json -Depth 5
-```
-
-*Expected Result:*
-- Channel `#sec-fraud-alerts` receives critical alerts on bank account divergence and duplicate submissions.
-- Channel `#ap-audit-queue` receives triage alerts on purchase order overruns and high-value approvals.
-- Replaying identical invoices triggers zero duplicate notifications (alert storm suppression).
-
----
-
-### Step 7: Storage Architecture & Persistence Transparency
-Inspect the system storage classification endpoint:
-
-```powershell
-Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/system/storage-info" -Method Get -Headers $headers | ConvertTo-Json
-```
-
-*Expected Result:*
-- `storage_type`: `IN_MEMORY_TRANSIENT`
-- `persistent_across_restarts`: `false`
-- `audit_trail_scope`: `EPHEMERAL_PER_CONTAINER_SESSION`
-- Transparent warning that state resets upon container/process restart.
-
----
-
-### Step 8: Conflicting Identity Detection & Rejection
-Submit an invoice with an existing `vendor_id::invoice_number` identity, but modified financial data ($9,999 vs $1,850):
-
-```powershell
-$conflictPayload = @{
-  fingerprint    = "tampered_hash_9999"
-  invoice_number = "INV-2026-001"
-  vendor_id      = "VEND-001"
-  total_amount   = 9999.00
-  decision       = "REJECTED_FRAUD_ALERT"
-  risk_score     = 95
-} | ConvertTo-Json
-
-try {
-  Invoke-RestMethod -Uri "http://127.0.0.1:3002/api/invoices" -Method Post -Headers $headers -Body $conflictPayload
-} catch {
-  $_.Exception.Response.StatusCode # Returns 409 Conflict
-}
-```
-
-*Expected Result:*
-- HTTP 409 Conflict with `CONFLICTING_IDENTITY_REJECTED`.
-- The existing record in the ERP ledger remains uncorrupted at $1,850.00.
+- Mock ERP state is in-memory, not durable across restarts.
+- No real ERP integration, external notifications or payment execution.
+- Local test credentials are automatically generated by the live test harness; do not publish or reuse production secrets.
+- This code is an educational engineering demonstration, not a financial fraud detection certification or financial system ready for production.
