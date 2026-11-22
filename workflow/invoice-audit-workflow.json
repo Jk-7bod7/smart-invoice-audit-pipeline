@@ -142,7 +142,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'AUTO_APPROVED', risk_score: $json.risk_score, flags: $json.flags }) }}"
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, po_number: ($json.po_number || null), currency: ($json.currency || 'USD'), subtotal: $json.subtotal, tax_amount: $json.tax_amount, total_amount: $json.total_amount, due_date: ($json.due_date || null), invoice_date: ($json.invoice_date || null), bank_details: ($json.bank_details || null), line_items: ($json.line_items || null), decision: 'AUTO_APPROVED', risk_score: $json.risk_score, flags: $json.flags }) }}"
       },
       "id": "node-9-ledger-auto-approved",
       "name": "HTTP: Post Ledger (Auto-Approved)",
@@ -163,7 +163,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'MANUAL_AUDIT_REQUIRED', risk_score: $json.risk_score, flags: $json.flags }) }}"
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, po_number: ($json.po_number || null), currency: ($json.currency || 'USD'), subtotal: $json.subtotal, tax_amount: $json.tax_amount, total_amount: $json.total_amount, due_date: ($json.due_date || null), invoice_date: ($json.invoice_date || null), bank_details: ($json.bank_details || null), line_items: ($json.line_items || null), decision: 'MANUAL_AUDIT_REQUIRED', risk_score: $json.risk_score, flags: $json.flags }) }}"
       },
       "id": "node-10-ledger-manual-audit",
       "name": "HTTP: Post Ledger (Manual Audit)",
@@ -184,7 +184,7 @@
         },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, total_amount: $json.total_amount, decision: 'REJECTED_FRAUD_ALERT', risk_score: $json.risk_score, flags: $json.flags }) }}"
+        "jsonBody": "={{ JSON.stringify({ fingerprint: $json.fingerprint, invoice_number: $json.invoice_number, vendor_id: $json.vendor_id, po_number: ($json.po_number || null), currency: ($json.currency || 'USD'), subtotal: $json.subtotal, tax_amount: $json.tax_amount, total_amount: $json.total_amount, due_date: ($json.due_date || null), invoice_date: ($json.invoice_date || null), bank_details: ($json.bank_details || null), line_items: ($json.line_items || null), decision: 'REJECTED_FRAUD_ALERT', risk_score: $json.risk_score, flags: $json.flags }) }}"
       },
       "id": "node-11-ledger-fraud-alert",
       "name": "HTTP: Post Ledger (Fraud Alert)",

@@ -281,37 +281,49 @@ async function runLiveN8nE2E() {
     console.log('✓ Test 3: Idempotent replay verified (zero duplicate ledger records and zero alert flood).');
 
     // -------------------------------------------------------------------------
-    // TEST 4: Conflicting Invoice Submission (Same Identity, Tampered Total) -> HTTP 409
+    // TEST 4: Conflicting Invoice Submission via Live n8n Webhook Path
     // -------------------------------------------------------------------------
-    console.log('\nExecuting Test 4: Conflicting Invoice Submission Detection...');
-    const conflictingInvoicePayload = {
-      fingerprint: 'altered_fingerprint_hash_9999',
-      invoice_number: 'INV-2026-001',
-      vendor_id: 'VEND-001',
-      total_amount: 9999.00, // Altered total!
-      decision: 'REJECTED_FRAUD_ALERT',
-      risk_score: 95
+    console.log('\nExecuting Test 4: Conflicting Invoice Submission via Live n8n Webhook Intake...');
+    const conflictingInvoice = {
+      ...cleanInvoice,
+      // Same identity (VEND-001 / INV-2026-001)
+      // Financially material change: altered total and line items ($9,999 vs $1,850)
+      line_items: [
+        { description: 'Tampered Scope Expansion Deliverable', quantity: 1, unit_price: 9999.00 }
+      ],
+      subtotal: 9999.00,
+      tax_amount: 0.00,
+      total_amount: 9999.00
     };
 
-    const conflictRes = await makeRequest(`${ERP_BASE_URL}/api/invoices`, {
+    const conflictRes = await makeRequest(N8N_URL, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'x-erp-api-key': TEST_ERP_KEY
+        'x-webhook-token': TEST_WEBHOOK_SECRET
       }
-    }, conflictingInvoicePayload);
+    }, conflictingInvoice);
 
-    assert.strictEqual(conflictRes.statusCode, 409, `Expected HTTP 409 on conflicting invoice, got ${conflictRes.statusCode}`);
-    assert.strictEqual(conflictRes.json.status, 'CONFLICTING_IDENTITY_REJECTED');
-    assert.strictEqual(conflictRes.json.decision, 'REJECTED_FRAUD_ALERT');
+    console.log(`Test 4 received status ${conflictRes.statusCode}, body:`, conflictRes.rawBody);
+    assert.notStrictEqual(conflictRes.statusCode, 200, 'Conflicting invoice must NOT receive HTTP 200 AUTO_APPROVED from webhook');
 
-    // Verify original invoice in ERP ledger remains intact with original total
+    // Verify in Mock ERP audit log that CONFLICTING_IDENTITY_REJECTED was recorded
+    const auditLogsAfterConflict = (await makeRequest(`${ERP_BASE_URL}/api/invoices/audit-log`, {
+      headers: { 'x-erp-api-key': TEST_ERP_KEY }
+    })).json.audit_logs;
+    const conflictLog = auditLogsAfterConflict.find(l => l.action === 'CONFLICTING_IDENTITY_REJECTED' && l.invoice_number === 'INV-2026-001');
+    assert.ok(conflictLog, 'Audit log entry CONFLICTING_IDENTITY_REJECTED must be recorded in ERP ledger');
+    assert.strictEqual(conflictLog.existing_total, 1850.00, 'Audit log must record existing total of 1850.00');
+    assert.strictEqual(conflictLog.attempted_total, 9999.00, 'Audit log must record attempted total of 9999.00');
+    assert.strictEqual(conflictLog.decision, 'REJECTED_FRAUD_ALERT', 'Decision in audit log must be REJECTED_FRAUD_ALERT');
+
+    // Verify original invoice in ERP ledger remains intact with original total ($1,850.00)
     const checkOriginal = await makeRequest(`${ERP_BASE_URL}/api/invoices`, {
       headers: { 'x-erp-api-key': TEST_ERP_KEY }
     });
     const origRecord = checkOriginal.json.invoices.find(i => i.invoice_number === 'INV-2026-001');
     assert.strictEqual(origRecord.total_amount, 1850.00, 'Original record total must remain intact and uncorrupted');
-    console.log('✓ Test 4: Conflicting invoice submission safely rejected (HTTP 409; original record protected).');
+    console.log('✓ Test 4: Conflicting invoice submission safely rejected via live n8n intake; ERP ledger protected.');
 
     // -------------------------------------------------------------------------
     // TEST 5: Business Invariant: Invalid Arithmetic Cannot Reach AUTO_APPROVED

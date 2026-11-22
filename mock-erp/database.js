@@ -114,7 +114,49 @@ class MockERPDatabase {
   }
 
   static computeContentHash(data) {
-    const payload = `${data.vendor_id || ''}|${data.invoice_number || ''}|${Number(data.total_amount || 0).toFixed(2)}|${data.currency || 'USD'}|${data.decision || ''}`;
+    // 1. Destination Bank Routing Normalization
+    let bankStr = '';
+    if (data.bank_details && typeof data.bank_details === 'object') {
+      const bankName = String(data.bank_details.bank_name || '').trim().toUpperCase();
+      const accountNum = String(data.bank_details.account_number || '').trim().toUpperCase();
+      const routingNum = String(data.bank_details.routing_number || '').trim().toUpperCase();
+      bankStr = `${bankName}:${routingNum}:${accountNum}`;
+    } else if (typeof data.bank_details === 'string') {
+      bankStr = data.bank_details.trim().toUpperCase();
+    } else if (data.bank_account_number) {
+      bankStr = String(data.bank_account_number).trim().toUpperCase();
+    }
+
+    // 2. Itemized Line Deliverables Normalization (quantities, prices, descriptions)
+    let lineItemsStr = '';
+    if (Array.isArray(data.line_items)) {
+      lineItemsStr = data.line_items.map(item => {
+        const desc = String(item.description || item.item || '').trim().toLowerCase();
+        const qty = Number(item.quantity || 0).toFixed(4);
+        const price = Number(item.unit_price || 0).toFixed(4);
+        const total = Number(item.total || (Number(qty) * Number(price))).toFixed(2);
+        return `${desc}#${qty}@${price}=${total}`;
+      }).sort().join(';');
+    } else if (typeof data.line_items === 'string') {
+      lineItemsStr = data.line_items.trim().toLowerCase();
+    }
+
+    // 3. Financially Material Composite Vector
+    const payload = [
+      String(data.vendor_id || '').trim().toUpperCase(),
+      String(data.invoice_number || '').trim().toUpperCase(),
+      String(data.po_number || '').trim().toUpperCase(),
+      String(data.currency || 'USD').trim().toUpperCase(),
+      Number(data.total_amount || 0).toFixed(2),
+      Number(data.subtotal || 0).toFixed(2),
+      Number(data.tax_amount || 0).toFixed(2),
+      String(data.due_date || '').trim(),
+      String(data.invoice_date || '').trim(),
+      bankStr,
+      lineItemsStr,
+      String(data.decision || '').trim().toUpperCase()
+    ].join('|');
+
     return crypto.createHash('sha256').update(payload).digest('hex');
   }
 
